@@ -1,0 +1,32 @@
+{
+  "name": "dsh-pi",
+  "version": "0.1.0",
+  "description": "pi on DeepSeek Harness — one command to set up, run and drive dsh-pi (profiles, terminal UI)",
+  "type": "module",
+  "main": "./index.js",
+  "bin": {
+    "dsh-pi": "./index.js"
+  },
+  "files": [
+    "index.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "@dsh-pi/preset": "^0.1.0",
+    "@dsh-pi/tui": "^0.1.1"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "pi",
+    "agent",
+    "tui",
+    "cli"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AndPuQing/dsh-pi.git"
+  }
+}
