@@ -54,6 +54,25 @@ const LOGO = [
 
 // ---- themes -----------------------------------------------------------------
 
+function createHighlightCode(codeBlock) {
+  return (text, lang) => {
+    const lines = text.split('\n')
+    const isDiff =
+      lang === 'diff' ||
+      lines.some((l) => /^[+\-@]/.test(l) || /^(diff --git|Index:|--- |\+\+\+ )/.test(l))
+    if (!isDiff) return lines.map((l) => codeBlock(l))
+    return lines.map((l) => {
+      if (/^\+\+\+ /.test(l)) return '\x1b[1m' + l + '\x1b[0m'
+      if (/^--- /.test(l)) return '\x1b[1m' + l + '\x1b[0m'
+      if (/^diff --git|^Index:/.test(l)) return '\x1b[35m\x1b[1m' + l + '\x1b[0m'
+      if (l.startsWith('+')) return '\x1b[32m' + l + '\x1b[0m'
+      if (l.startsWith('-')) return '\x1b[31m' + l + '\x1b[0m'
+      if (l.startsWith('@@')) return '\x1b[36m' + l + '\x1b[0m'
+      return codeBlock(l)
+    })
+  }
+}
+
 const THEMES = {
   default: {
     name: 'default',
@@ -72,6 +91,7 @@ const THEMES = {
       italic: (s) => `\x1b[3m${s}\x1b[0m`,
       strikethrough: plain,
       underline: (s) => `\x1b[4m${s}\x1b[0m`,
+      highlightCode: createHighlightCode((s) => `\x1b[36m${s}\x1b[0m`),
     },
     editor: { borderColor: (s) => `\x1b[90m${s}\x1b[0m`, selectList: {} },
     user: (s) => `\x1b[94m❯\x1b[0m ${s}`,
@@ -98,6 +118,7 @@ const THEMES = {
       italic: (s) => `\x1b[3m${s}\x1b[0m`,
       strikethrough: plain,
       underline: (s) => `\x1b[4m${s}\x1b[0m`,
+      highlightCode: createHighlightCode((s) => `\x1b[34m${s}\x1b[0m`),
     },
     editor: { borderColor: (s) => `\x1b[34m${s}\x1b[0m`, selectList: {} },
     user: (s) => `\x1b[34m❯\x1b[0m ${s}`,
@@ -375,7 +396,7 @@ function setupUi(runtimeRef) {
     if (shutting) return
     shutting = true
     tui.stop()
-    runtime.dispose()
+    runtimeRef.dispose?.()
     process.exit(0)
   }
   process.on('SIGINT', shutdown)
