@@ -1,0 +1,5 @@
+# @dsh-pi/llm bundle patch: mounts the pi-models bridge plugin.
+- insert:
+    - id: dsh-pi-llm
+      name: '@dsh-pi/llm'
+      config: {}

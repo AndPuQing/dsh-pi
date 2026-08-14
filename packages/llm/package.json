@@ -1,0 +1,37 @@
+{
+  "name": "@dsh-pi/llm",
+  "version": "0.1.0",
+  "description": "Bridge pi's model configuration (models.json) into dsh as llm-pi-ai provider routes — one model config across pi and dsh",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "yaml": "^2.4.0"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "pi",
+    "llm",
+    "provider"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AndPuQing/dsh-pi.git"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}
