@@ -40,9 +40,10 @@ function writeProfile(dest, pkg, patch) {
   fs.writeFileSync(path.join(dest, 'cordis.patch.yml'), patch)
 }
 
-function setup(name, kind) {
+function setup(name, kind, opts = {}) {
   const dest = path.join(home, 'profiles', name)
   if (fs.existsSync(dest)) {
+    if (opts.silent) return dest
     console.error(`profile '${name}' already exists at ${dest}`)
     process.exit(1)
   }
@@ -91,13 +92,16 @@ function setup(name, kind) {
 
   const r = spawnSync('npx', ['--yes', 'pnpm', 'install', '--registry', REGISTRY], {
     cwd: dest,
-    stdio: 'inherit',
+    stdio: opts.silent ? 'ignore' : 'inherit',
   })
   if (r.status !== 0) {
-    console.error('dependency install failed — check network access to registry.npmjs.org')
+    if (!opts.silent) console.error('dependency install failed — check network access to registry.npmjs.org')
     process.exit(1)
   }
-  console.log(`✅ profile '${name}' ready — boot with: dsh --profile ${name}${headless ? ' "your task"' : ''}`)
+  if (!opts.silent) {
+    console.log(`✅ profile '${name}' ready — boot with: dsh --profile ${name}${headless ? ' "your task"' : ''}`)
+  }
+  return dest
 }
 
 function resolveDsh() {
@@ -120,6 +124,11 @@ function tui() {
 }
 
 function web(name, args) {
+  // auto-provision: create the profile on first use — no explicit setup step
+  if (!fs.existsSync(path.join(home, 'profiles', name))) {
+    console.error(`[dsh-pi] profile '${name}' not found — creating it (web)…`)
+    setup(name, 'web', { silent: true })
+  }
   const { cmd, args: pre } = resolveDsh()
   const r = spawnSync(cmd, [...pre, '--profile', name, ...args], { stdio: 'inherit' })
   process.exit(r.status ?? 0)
@@ -151,7 +160,12 @@ switch (cmd) {
     console.log(HELP)
     break
   default:
+    // no command → just run the terminal UI (auto-provisions pi-sdk on first use)
+    if (!cmd) {
+      tui()
+      break
+    }
     console.log(HELP)
-    console.error(`\nunknown command '${cmd || ''}'`)
-    process.exit(cmd ? 1 : 0)
+    console.error(`\nunknown command '${cmd}'`)
+    process.exit(1)
 }
