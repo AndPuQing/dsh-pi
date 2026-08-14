@@ -43,6 +43,31 @@ Override the persona per-profile via `cordis.patch.yml`:
     persona: "Your custom persona text"
 ```
 
+## Models
+
+ (the multi-provider adapter backed by pi-ai) is built into . No plugin needed — configure your provider routes in :
+
+
+
+Set the default route with .
+
+## Models
+
+`dsh-llm-pi-ai` (the multi-provider adapter backed by pi-ai) is built into `dsh-base` — no plugin needed. Configure provider routes in `$DSH_HOME/settings.yaml`:
+
+```yaml
+llm-pi-ai:
+  providers:
+    my-provider:
+      apiKeyEnv: MY_PROVIDER_API_KEY
+      baseURL: https://...
+      api: openai-completions
+      models:
+        - id: my-model
+```
+
+Set the default route with `agent-default-model`.
+
 ## Requirements
 
 - dsh ≥ 0.1.0-rc.6 (`@deepseek-ai/dsh-tools` must resolve from the profile module tree)
