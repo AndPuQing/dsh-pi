@@ -136,8 +136,7 @@ function ensureProfile() {
     stdio: 'inherit',
   })
   if (r.status !== 0) {
-    console.error('[dsh-pi-tui] profile install failed — check network access to registry.npmjs.org')
-    process.exit(1)
+    throw new Error('profile dependency install failed — check network access to registry.npmjs.org')
   }
 }
 
@@ -173,7 +172,7 @@ function saveSessionId(id) {
 
 // ---- UI ------------------------------------------------------------------------
 
-function setupUi(runtime) {
+function setupUi(runtimeRef) {
   const terminal = new ProcessTerminal()
   const tui = new TuiMainScreen(terminal)
   let theme = THEMES[process.env.DSH_PI_THEME] || THEMES.default
@@ -182,7 +181,6 @@ function setupUi(runtime) {
   let currentAsst = null
   let asstText = ''
   let inText = false
-  let ready = false
   const queue = []
 
   const container = new VStack([])
@@ -227,7 +225,7 @@ function setupUi(runtime) {
   }
 
   // live session-event stream from the in-process runtime
-  runtime.onEvent((session, event) => {
+  function renderEvent(session, event) {
     const d = event.data || {}
     if (event.type === 'assistant/chunk') {
       const chunk = d.chunk || {}
@@ -245,7 +243,7 @@ function setupUi(runtime) {
       const txt = parts.find((p) => p.type === 'text' && p.text)?.text || ''
       if (txt) addMessage('result', txt.split('\n')[0].slice(0, 140))
     }
-  })
+  }
 
   const HELP = `commands:
   /help          this help
@@ -274,7 +272,7 @@ function setupUi(runtime) {
         rebuild(); addMessage('sys', `tool details: ${showTools ? 'on' : 'off'}`)
         return true
       case '/new':
-        runtime.newSession(); addMessage('sys', 'new session'); return true
+        runtimeRef.newSession?.(); addMessage('sys', 'new session'); return true
       case '/quit':
       case 'exit':
         shutdown(); return true
@@ -287,13 +285,13 @@ function setupUi(runtime) {
     const t = text.trim()
     if (!t) return
     if (t.startsWith('/') || t === 'exit') { if (runCommand(t)) return }
-    if (!ready) {
+    if (!runtimeRef.ready) {
       queue.push(t)
       addMessage('sys', '… runtime still starting, prompt queued')
       return
     }
     addMessage('user', t)
-    runtime.prompt(t)
+    runtimeRef.prompt(t)
   }
 
   editor.onSubmit = (text) => {
@@ -320,10 +318,17 @@ function setupUi(runtime) {
 
   return {
     tui,
+    renderEvent,
+    setStarting() {
+      addMessage('sys', '… starting dsh-pi runtime (first run installs dependencies, please wait)')
+    },
     setReady() {
-      ready = true
+      runtimeRef.ready = true
       addMessage('sys', 'ready — type a prompt')
       for (const q of queue.splice(0)) submit(q)
+    },
+    fail(message) {
+      addMessage('sys', '! startup failed: ' + message)
     },
   }
 }
@@ -331,10 +336,9 @@ function setupUi(runtime) {
 // ---- main ----------------------------------------------------------------------
 
 async function main() {
-  ensureProfile()
   const { provider, model } = defaultModel()
 
-  const runtime = await (async () => {
+  async function buildRuntime() {
     const ctx = await bootRuntime()
     const agents = ctx.get('agents')
     const defaultModel = ctx.get('agentDefaultModel')
@@ -378,14 +382,27 @@ async function main() {
         try { ctx.fiber?.dispose?.() } catch { /* best effort */ }
       },
     }
-  })()
+  }
 
-  const ui = setupUi(runtime)
-  // session continuity: reuse the persisted id when it matches nothing wedged —
-  // for the in-process rewrite, always start fresh but remember the id.
-  const persisted = loadSessionId()
-  saveSessionId(runtime.sessionId)
-  ui.setReady()
+  // UI first: instant; boot the runtime in the background
+  const runtimeRef = { ready: false, prompt: null, newSession: null, dispose: null, onEvent: null }
+  const ui = setupUi(runtimeRef)
+  ui.setStarting()
+  ;(async () => {
+    try {
+      ensureProfile()
+      const runtime = await buildRuntime()
+      runtimeRef.prompt = runtime.prompt
+      runtimeRef.newSession = runtime.newSession
+      runtimeRef.dispose = runtime.dispose
+      runtime.onEvent((session, event) => ui.renderEvent(session, event))
+      saveSessionId(runtime.sessionId)
+      ui.setReady()
+    } catch (e) {
+      ui.fail(e.message)
+      ui.setReady()
+    }
+  })()
 }
 
 main().catch((e) => {
