@@ -1,6 +1,6 @@
 {
   "name": "@dsh-pi/llm",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Bridge pi's model configuration (models.json) into dsh as llm-pi-ai provider routes — one model config across pi and dsh",
   "type": "module",
   "main": "./index.js",

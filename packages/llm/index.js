@@ -15,7 +15,7 @@ const piHome = () => process.env.PI_HOME || path.join(os.homedir(), '.pi', 'agen
 const home = () => process.env.DSH_HOME || path.join(os.homedir(), '.dsh')
 
 function envName(providerId) {
-  return providerId.replace(/[^A-Za-z0-9_]/g, '_').toUpperCase() + '_API_KEY'
+  return 'DSH_PI_' + providerId.replace(/[^A-Za-z0-9_]/g, '_').toUpperCase() + '_API_KEY'
 }
 
 function readJson(file) {
