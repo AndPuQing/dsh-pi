@@ -1,14 +1,12 @@
 #!/usr/bin/env node
-// @dsh-pi/tui — v1: pi-style terminal UI for dsh-pi.
+// @dsh-pi/tui — v2: pi-style terminal UI for dsh-pi.
 //
-// Renders with @earendil-works/pi-tui (Editor input, Markdown messages,
-// auto-scrolling ScrollView) while driving the dsh-pi SDK runtime
-// (`pi-sdk` profile) over stdio JSON-RPC.
+// v2 additions over v1: slash commands, theme switching, tool-call folding,
+// Ctrl-L clear, and session continuity (persisted session id + /new).
 //
 // Env:
 //   DSH_BIN              dsh binary (default: PATH, then npx @deepseek-ai/dsh)
-//   DSH_PI_PROVIDER/DSH_PI_MODEL  model route override (default: settings.yaml
-//                                  agent-default-model, else opencode-go/…)
+//   DSH_PI_PROVIDER/DSH_PI_MODEL  model route override (default: settings.yaml)
 import { spawn, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -27,8 +25,63 @@ const home = process.env.DSH_HOME || path.join(os.homedir(), '.dsh')
 const PROF = 'pi-sdk'
 const profDir = path.join(home, 'profiles', PROF)
 const REGISTRY = 'https://registry.npmjs.org'
+const STATE_DIR = path.join(home, 'dsh-pi-tui')
+const plain = (s) => s
 
-// ---- model route ----------------------------------------------------------
+// ---- themes -----------------------------------------------------------------
+
+const THEMES = {
+  default: {
+    name: 'default',
+    markdown: {
+      heading: (s) => `\x1b[1m${s}\x1b[0m`,
+      link: plain,
+      linkUrl: plain,
+      code: (s) => `\x1b[36m${s}\x1b[0m`,
+      codeBlock: (s) => `\x1b[36m${s}\x1b[0m`,
+      codeBlockBorder: plain,
+      quote: plain,
+      quoteBorder: plain,
+      hr: plain,
+      listBullet: (s) => `\x1b[90m${s}\x1b[0m`,
+      bold: (s) => `\x1b[1m${s}\x1b[0m`,
+      italic: (s) => `\x1b[3m${s}\x1b[0m`,
+      strikethrough: plain,
+      underline: (s) => `\x1b[4m${s}\x1b[0m`,
+    },
+    editor: { borderColor: (s) => `\x1b[90m${s}\x1b[0m`, selectList: {} },
+    user: (s) => `\x1b[90m❯\x1b[0m ${s}`,
+    tool: (s) => `\x1b[36m⚙ ${s}\x1b[0m`,
+    result: (s) => `\x1b[32m✓\x1b[0m ${s}`,
+    sys: (s) => `\x1b[33m${s}\x1b[0m`,
+  },
+  light: {
+    name: 'light',
+    markdown: {
+      heading: (s) => `\x1b[1m${s}\x1b[0m`,
+      link: plain,
+      linkUrl: plain,
+      code: (s) => `\x1b[34m${s}\x1b[0m`,
+      codeBlock: (s) => `\x1b[34m${s}\x1b[0m`,
+      codeBlockBorder: plain,
+      quote: plain,
+      quoteBorder: plain,
+      hr: plain,
+      listBullet: (s) => `\x1b[90m${s}\x1b[0m`,
+      bold: (s) => `\x1b[1m${s}\x1b[0m`,
+      italic: (s) => `\x1b[3m${s}\x1b[0m`,
+      strikethrough: plain,
+      underline: (s) => `\x1b[4m${s}\x1b[0m`,
+    },
+    editor: { borderColor: (s) => `\x1b[34m${s}\x1b[0m`, selectList: {} },
+    user: (s) => `\x1b[34m❯\x1b[0m ${s}`,
+    tool: (s) => `\x1b[34m⚙ ${s}\x1b[0m`,
+    result: (s) => `\x1b[32m✓\x1b[0m ${s}`,
+    sys: (s) => `\x1b[33m${s}\x1b[0m`,
+  },
+}
+
+// ---- model route ------------------------------------------------------------
 
 function defaultModel() {
   const envP = process.env.DSH_PI_PROVIDER
@@ -45,7 +98,7 @@ function defaultModel() {
   }
 }
 
-// ---- profile setup ---------------------------------------------------------
+// ---- profile setup -----------------------------------------------------------
 
 function ensureProfile() {
   if (fs.existsSync(profDir)) return
@@ -86,7 +139,33 @@ function ensureProfile() {
   }
 }
 
-// ---- JSON-RPC runtime -------------------------------------------------------
+// ---- session id persistence ---------------------------------------------------
+
+function sessionStatePath() {
+  fs.mkdirSync(STATE_DIR, { recursive: true })
+  const slug = process.cwd().replace(/[^a-zA-Z0-9_-]+/g, '_').slice(0, 80) || 'root'
+  return path.join(STATE_DIR, `session-${slug}.id`)
+}
+
+function loadSessionId() {
+  try {
+    const v = fs.readFileSync(sessionStatePath(), 'utf8').trim()
+    if (v) return v
+  } catch {
+    /* first run */
+  }
+  return null
+}
+
+function saveSessionId(id) {
+  try {
+    fs.writeFileSync(sessionStatePath(), id)
+  } catch {
+    /* best effort */
+  }
+}
+
+// ---- JSON-RPC runtime ----------------------------------------------------------
 
 function resolveDsh() {
   if (process.env.DSH_BIN) return { cmd: process.env.DSH_BIN, args: [] }
@@ -136,75 +215,132 @@ function startRuntime() {
   return { child, request, onMessage: (h) => handlers.push(h) }
 }
 
-// ---- themes ----------------------------------------------------------------
+// ---- UI ------------------------------------------------------------------------
 
-const plain = (s) => s
-const markdownTheme = {
-  heading: (s) => `\x1b[1m${s}\x1b[0m`,
-  link: plain,
-  linkUrl: plain,
-  code: (s) => `\x1b[36m${s}\x1b[0m`,
-  codeBlock: (s) => `\x1b[36m${s}\x1b[0m`,
-  codeBlockBorder: plain,
-  quote: plain,
-  quoteBorder: plain,
-  hr: plain,
-  listBullet: (s) => `\x1b[90m${s}\x1b[0m`,
-  bold: (s) => `\x1b[1m${s}\x1b[0m`,
-  italic: (s) => `\x1b[3m${s}\x1b[0m`,
-  strikethrough: plain,
-  underline: (s) => `\x1b[4m${s}\x1b[0m`,
-}
-const editorTheme = {
-  borderColor: (s) => `\x1b[90m${s}\x1b[0m`,
-  selectList: {},
-}
-const defaultTextStyle = {}
-
-// ---- UI ---------------------------------------------------------------------
-
-function setupUi({ request, onMessage, sessionId }) {
+function setupUi({ request, onMessage, sessionId, setSessionId }) {
   const terminal = new ProcessTerminal()
   const tui = new TuiMainScreen(terminal)
 
-  const messages = new VStack([])
-  const scroll = new ScrollView(messages, { follow: 'end', primary: true })
-  const editor = new Editor(tui, editorTheme)
+  let theme = THEMES[process.env.DSH_PI_THEME] || THEMES.default
+  let showTools = true
+  const messages = []
+  let currentAsst = null
+  let asstText = ''
+  let inText = false
+  let busy = false
+  // resume self-heal: a resumed session whose first turn spends no step is
+  // wedged — switch to a fresh session automatically.
+  let firstTurn = true
+  let turnSawStep = false
+  let lastPrompt = ''
+
+  const container = new VStack([])
+  const scroll = new ScrollView(container, { follow: 'end', primary: true })
+  const editor = new Editor(tui, theme.editor)
   tui.addChild(new VStack([scroll, editor]))
   tui.start()
   tui.setFocus(editor)
 
-  let busy = false
-  let currentAsst = null
-  let asstText = ''
-  let inText = false
+  function addMessage(kind, text) {
+    const t = theme
+    let comp
+    if (kind === 'asst') comp = new Markdown(text, 1, 0, t.markdown, {})
+    else comp = new Text(kind === 'user' ? t.user(text) : kind === 'tool' ? t.tool(text) : kind === 'result' ? t.result(text) : t.sys(text))
+    messages.push({ kind, text, comp })
+    container.addChild(comp)
+    tui.requestRender()
+  }
+
+  function rebuild() {
+    container.clear()
+    for (const m of messages) {
+      const t = theme
+      if (m.kind === 'asst') m.comp = new Markdown(m.text, 1, 0, t.markdown, {})
+      else if (m.kind === 'user') m.comp = new Text(t.user(m.text))
+      else if (m.kind === 'tool') m.comp = new Text(showTools ? t.tool(m.text) : t.tool(m.text.split('\n')[0]))
+      else if (m.kind === 'result') m.comp = new Text(showTools ? t.result(m.text) : t.sys('…'))
+      else m.comp = new Text(t.sys(m.text))
+      container.addChild(m.comp)
+    }
+    tui.requestRender()
+  }
 
   function upsertAsst() {
-    // replace the in-progress assistant message with the accumulated text
-    if (currentAsst) messages.removeChild(currentAsst)
+    if (currentAsst) container.removeChild(currentAsst)
     if (asstText) {
-      currentAsst = new Markdown(asstText, 1, 0, markdownTheme, defaultTextStyle)
-      messages.addChild(currentAsst)
+      currentAsst = new Markdown(asstText, 1, 0, theme.markdown, {})
+      container.addChild(currentAsst)
     } else {
       currentAsst = null
     }
     tui.requestRender()
   }
 
+  const HELP = `commands:
+  /help          this help
+  /clear         clear the conversation view (session stays)
+  /theme <name>  switch theme: ${Object.keys(THEMES).join(', ')}
+  /tools [on|off]  fold/unfold tool-call details
+  /new           start a fresh session
+  /quit, exit    leave`
+
+  function runCommand(text) {
+    const [cmd, arg] = text.split(/\s+/, 2)
+    switch (cmd) {
+      case '/help':
+        addMessage('sys', HELP)
+        return true
+      case '/clear':
+        messages.length = 0
+        currentAsst = null
+        asstText = ''
+        rebuild()
+        return true
+      case '/theme': {
+        const t = THEMES[arg]
+        if (!t) {
+          addMessage('sys', `unknown theme '${arg}' — ${Object.keys(THEMES).join(', ')}`)
+        } else {
+          theme = t
+          rebuild()
+          addMessage('sys', `theme: ${t.name}`)
+        }
+        return true
+      }
+      case '/tools':
+        if (arg === 'off') showTools = false
+        else if (arg === 'on') showTools = true
+        else showTools = !showTools
+        rebuild()
+        addMessage('sys', `tool details: ${showTools ? 'on' : 'off'}`)
+        return true
+      case '/new':
+        setSessionId('tui-' + Date.now())
+        addMessage('sys', `new session: ${sessionId}`)
+        return true
+      case '/quit':
+      case 'exit':
+        shutdown()
+        return true
+      default:
+        addMessage('sys', `unknown command '${cmd}' — /help`)
+        return true
+    }
+  }
+
   editor.onSubmit = (text) => {
     const t = text.trim()
     if (!t) return
-    if (t === 'exit' || t === '/quit') {
-      shutdown()
-      return
+    if (t.startsWith('/') || t === 'exit') {
+      if (runCommand(t)) return
     }
-    messages.addChild(new Text(`\x1b[90m❯\x1b[0m ${t}`))
+    addMessage('user', t)
+    lastPrompt = t
     busy = true
     request('session/prompt', { sessionId, contentBlocks: [{ type: 'text', text: t }] }).catch(
       (e) => {
-        messages.addChild(new Text(`\x1b[31m! ${e.message}\x1b[0m`))
+        addMessage('sys', `! ${e.message}`)
         busy = false
-        tui.requestRender()
       },
     )
     tui.requestRender()
@@ -217,6 +353,27 @@ function setupUi({ request, onMessage, sessionId }) {
     if (msg.method !== 'session.event') return
     const ev = msg.params.event
     const d = ev.data || {}
+    if (ev.type === 'turn/start') {
+      turnSawStep = false
+    } else if (ev.type === 'step/start') {
+      turnSawStep = true
+    } else if (ev.type === 'turn/end') {
+      busy = false
+      if (firstTurn && !turnSawStep) {
+        firstTurn = false
+        const fresh = 'tui-' + Date.now()
+        setSessionId(fresh)
+        saveSessionId(fresh)
+        addMessage('sys', 'previous session state unusable — started a fresh session')
+        if (lastPrompt) {
+          addMessage('sys', 're-sending your last prompt…')
+          request('session/prompt', {
+            sessionId: fresh,
+            contentBlocks: [{ type: 'text', text: lastPrompt }],
+          }).catch((e) => addMessage('sys', `! ${e.message}`))
+        }
+      }
+    }
     if (ev.type === 'assistant/chunk') {
       const chunk = d.chunk || {}
       if (chunk.type === 'block-start' && chunk.blockType === 'text') inText = true
@@ -233,17 +390,20 @@ function setupUi({ request, onMessage, sessionId }) {
       } catch {
         a = String(a).slice(0, 140)
       }
-      messages.addChild(new Text(`\x1b[36m⚙ ${d.name}\x1b[0m ${a}`))
-      tui.requestRender()
+      addMessage('tool', `${d.name}\n  ${a}`)
     } else if (ev.type === 'tool/result') {
       const parts = d.message?.content || []
       const txt = parts.find((p) => p.type === 'text' && p.text)?.text || ''
-      if (txt) {
-        messages.addChild(new Text(`\x1b[32m✓\x1b[0m ${txt.split('\n')[0].slice(0, 140)}`))
-        tui.requestRender()
-      }
-    } else if (ev.type === 'turn/end') {
-      busy = false
+      if (txt) addMessage('result', txt.split('\n')[0].slice(0, 140))
+    }
+  })
+  tui.addInputListener((data) => {
+    if (data === '\x0c') {
+      // Ctrl-L: clear the view (session stays)
+      messages.length = 0
+      currentAsst = null
+      asstText = ''
+      rebuild()
     }
   })
 
@@ -253,21 +413,19 @@ function setupUi({ request, onMessage, sessionId }) {
     shutting = true
     tui.stop()
     request('shutdown').catch(() => {})
-    setTimeout(() => terminal.release?.() ?? 0, 0)
     process.exit(0)
   }
   process.on('SIGINT', shutdown)
   process.on('SIGTERM', shutdown)
-  tui.start()
+
   return { tui, shutdown }
 }
 
-// ---- main -------------------------------------------------------------------
+// ---- main ----------------------------------------------------------------------
 
 async function main() {
   ensureProfile()
   const { child, request, onMessage } = startRuntime()
-  const sessionId = 'tui-' + Date.now()
   const { provider, model } = defaultModel()
 
   let init = null
@@ -287,7 +445,9 @@ async function main() {
   // settle so the first prompt is not swallowed as an empty turn
   await new Promise((r) => setTimeout(r, 2500))
 
-  setupUi({ request, onMessage, sessionId })
+  let sessionId = loadSessionId() || 'tui-' + Date.now()
+  saveSessionId(sessionId)
+  setupUi({ request, onMessage, sessionId, setSessionId: (id) => (sessionId = id) })
 }
 
 main()

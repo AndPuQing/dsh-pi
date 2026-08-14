@@ -19,8 +19,7 @@ Controls: type a prompt and Enter; `exit` / `/quit` / Ctrl-C to leave. Each run 
 
 ## Roadmap
 
-- v1: render with `@earendil-works/pi-tui` (Editor + Markdown + ScrollView) for the pi look
-- v2: session tree navigation, keybindings, themes
+- v2 (done): slash commands, theme switching (default/light), tool-call folding, Ctrl-L clear, session continuity with self-heal
 
 ## License
 
