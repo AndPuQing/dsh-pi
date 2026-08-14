@@ -1,0 +1,14 @@
+{
+  "name": "dsh-pi",
+  "version": "0.1.0",
+  "private": true,
+  "description": "pi on DeepSeek Harness — plugin suite (prompt / fff / tools)",
+  "workspaces": [
+    "packages/*"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AndPuQing/dsh-pi.git"
+  }
+}

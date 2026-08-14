@@ -1,0 +1,5 @@
+# @dsh-pi/tools bundle patch: mounts the dsh-pi-tools plugin row.
+- insert:
+    - id: dsh-pi-edit
+      name: '@dsh-pi/tools'
+      config: {}

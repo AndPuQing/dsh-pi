@@ -1,0 +1,33 @@
+{
+  "name": "@dsh-pi/prompt",
+  "version": "0.1.0",
+  "description": "pi-style system prompt for DeepSeek Harness (dsh-pi). A Cordis plugin bundle that replaces the system prompt with pi's minimal-core, tool-listing, guideline style.",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "pi",
+    "prompt"
+  ],
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AndPuQing/dsh-pi.git"
+  },
+  "homepage": "https://github.com/AndPuQing/dsh-pi"
+}

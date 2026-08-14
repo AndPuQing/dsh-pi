@@ -1,0 +1,10 @@
+# @dsh-pi/prompt bundle patch: mounts the dsh-pi-prompt plugin row.
+# Override at will from a higher patch layer:
+#   - id: dsh-pi-prompt
+#     config:
+#       persona: "Your custom persona text"
+- insert:
+    - id: dsh-pi-prompt
+      name: '@dsh-pi/prompt'
+      config:
+        complete: true

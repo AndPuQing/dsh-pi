@@ -1,0 +1,34 @@
+{
+  "name": "@dsh-pi/tools",
+  "version": "0.1.0",
+  "description": "pi-compatible tool surface for DeepSeek Harness (dsh-pi): an `edit` tool with pi's exact interface plus pi-style descriptions for read/write/bash.",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "pi",
+    "edit",
+    "tools"
+  ],
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AndPuQing/dsh-pi.git"
+  },
+  "homepage": "https://github.com/AndPuQing/dsh-pi"
+}
