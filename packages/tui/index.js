@@ -42,6 +42,15 @@ const ANCHOR = createRequire(import.meta.url).resolve('@deepseek-ai/dsh/package.
 const PROFILE_ROOT_CONFIG = '# dsh profile root — empty entry list; tree composed as patches.\n[]\n'
 const plain = (s) => s
 
+const LOGO = [
+  '  ██████╗ ███████╗██╗  ██╗    ██████╗ ██╗',
+  '  ██╔══██╗██╔════╝██║  ██║    ██╔══██╗██║',
+  '  ██████╔╝███████╗███████║    ██████╔╝██║',
+  '  ██╔═══╝ ╚════██║██╔══██║    ██╔═══╝ ██║',
+  '  ██║     ███████║██║  ██║    ██║     ██║',
+  '  ╚═╝     ╚══════╝╚═╝  ╚═╝    ╚═╝     ╚═╝',
+].join('\n')
+
 // ---- themes -----------------------------------------------------------------
 
 const THEMES = {
@@ -69,6 +78,7 @@ const THEMES = {
     result: (s) => `\x1b[32m✓\x1b[0m ${s}`,
     sys: (s) => `\x1b[33m${s}\x1b[0m`,
     status: (s) => `\x1b[90m${s}\x1b[0m`,
+    logo: (s) => `\x1b[36m${s}\x1b[0m`,
   },
   light: {
     name: 'light',
@@ -94,6 +104,7 @@ const THEMES = {
     result: (s) => `\x1b[32m✓\x1b[0m ${s}`,
     sys: (s) => `\x1b[33m${s}\x1b[0m`,
     status: (s) => `\x1b[90m${s}\x1b[0m`,
+    logo: (s) => `\x1b[36m${s}\x1b[0m`,
   },
 }
 
@@ -186,16 +197,32 @@ function setupUi(runtimeRef) {
   const container = new VStack([])
   const scroll = new ScrollView(container, { follow: 'end', primary: true })
   const editor = new Editor(tui, theme.editor)
-  tui.addChild(new VStack([scroll, editor]))
+  const statusText = new Text(theme.status('starting…'))
+  tui.addChild(new VStack([scroll, editor, statusText]))
   tui.start()
   tui.setFocus(editor)
+
+  function setStatus(str) {
+    statusText.setText(theme.status(str))
+    tui.requestRender()
+  }
 
   function addMessage(kind, text) {
     const t = theme
     const comp =
       kind === 'asst'
         ? new Markdown(text, 1, 0, t.markdown, {})
-        : new Text(kind === 'user' ? t.user(text) : kind === 'tool' ? t.tool(text) : kind === 'result' ? t.result(text) : t.sys(text))
+        : new Text(
+            kind === 'user'
+              ? t.user(text)
+              : kind === 'tool'
+                ? t.tool(text)
+                : kind === 'result'
+                  ? t.result(text)
+                  : kind === 'logo'
+                    ? t.logo(text)
+                    : t.sys(text),
+          )
     messages.push({ kind, text, comp })
     container.addChild(comp)
     tui.requestRender()
@@ -208,6 +235,7 @@ function setupUi(runtimeRef) {
       else if (m.kind === 'user') m.comp = new Text(t.user(m.text))
       else if (m.kind === 'tool') m.comp = new Text(showTools ? t.tool(m.text) : t.tool(m.text.split('\n')[0]))
       else if (m.kind === 'result') m.comp = new Text(showTools ? t.result(m.text) : t.sys('…'))
+      else if (m.kind === 'logo') m.comp = new Text(t.logo(m.text))
       else m.comp = new Text(t.sys(m.text))
       container.addChild(m.comp)
     }
@@ -227,6 +255,8 @@ function setupUi(runtimeRef) {
   // live session-event stream from the in-process runtime
   function renderEvent(session, event) {
     const d = event.data || {}
+    if (event.type === 'turn/start') setStatus('● busy…')
+    if (event.type === 'turn/end') setStatus('ready')
     if (event.type === 'assistant/chunk') {
       const chunk = d.chunk || {}
       if (chunk.type === 'block-start' && chunk.blockType === 'text') inText = true
@@ -237,7 +267,7 @@ function setupUi(runtimeRef) {
     } else if (event.type === 'tool/call') {
       let a = d.arguments || ''
       try { a = JSON.stringify(JSON.parse(a)).slice(0, 140) } catch { a = String(a).slice(0, 140) }
-      addMessage('tool', `${d.name}\n  ${a}`)
+      addMessage('tool', `${d.name}\n  ${a}\n`)
     } else if (event.type === 'tool/result') {
       const parts = d.message?.content || []
       const txt = parts.find((p) => p.type === 'text' && p.text)?.text || ''
@@ -320,11 +350,12 @@ function setupUi(runtimeRef) {
     tui,
     renderEvent,
     setStarting() {
-      addMessage('sys', '… starting dsh-pi runtime (first run installs dependencies, please wait)')
+      addMessage('logo', LOGO)
+      setStatus('… starting dsh-pi runtime…')
     },
     setReady() {
       runtimeRef.ready = true
-      addMessage('sys', 'ready — type a prompt')
+      setStatus('ready — type a prompt')
       for (const q of queue.splice(0)) submit(q)
     },
     fail(message) {
