@@ -1,0 +1,15 @@
+# dsh-pi agent preset: pi-style prompt + frecency search + pi edit.
+# Installed by @dsh-pi/preset into $DSH_HOME/.agent-presets/dsh-pi/ —
+# auto-discovered by the agent-presets roster (includeUserRoot default true).
+- id: dsh-pi-prompt
+  name: '@dsh-pi/prompt'
+  config:
+    complete: true
+
+- id: dsh-pi-fff
+  name: '@dsh-pi/fff'
+  config: {}
+
+- id: dsh-pi-tools
+  name: '@dsh-pi/tools'
+  config: {}

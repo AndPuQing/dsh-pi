@@ -1,0 +1,11 @@
+# dsh-pi preset bundle patch: mount the installer plugin and make web
+# sessions default to the dsh-pi agent preset.
+# (Headless profiles have no agent-presets row — the override is a no-op there.)
+- id: agent-presets
+  config:
+    default: dsh-pi
+
+- insert:
+    - id: dsh-pi-preset
+      name: '@dsh-pi/preset'
+      config: {}

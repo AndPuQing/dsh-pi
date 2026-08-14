@@ -1,0 +1,39 @@
+{
+  "name": "@dsh-pi/preset",
+  "version": "0.1.0",
+  "description": "dsh-pi agent preset: installs the dsh-pi preset and makes it the default for web sessions",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "agent-presets",
+    "README.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "@dsh-pi/fff": "^0.1.0",
+    "@dsh-pi/prompt": "^0.1.0",
+    "@dsh-pi/tools": "^0.1.0"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "pi",
+    "preset"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AndPuQing/dsh-pi.git"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}
