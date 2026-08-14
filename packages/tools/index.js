@@ -5,8 +5,12 @@
 //    path — shadowing dsh's global single-replacement `edit` for that
 //    agent. `agent/created` carries `{ agent }`; agent.ctx.tools is the
 //    agent's scope layer (agent → preset → global, nearest shadows).
-// 2) Aligns the model-visible descriptions of read/write/bash with pi's
-//    wording via the system-prompt assemble waterfall.
+// 2) Aligns the model-visible descriptions of read/write/bash/edit with
+//    pi's wording — generated DYNAMICALLY from each tool's actual
+//    parameters, so the description always matches the real schema
+//    (e.g. edit with `edits[]` gets the multi-edit text; edit with
+//    `old_string` gets the single-replacement text; bash lists only the
+//    parameters it actually has).
 import fs from 'node:fs'
 import path from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -14,21 +18,60 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 const PI_EDIT_DESC =
   'Edit a single file using exact text replacement. Every edits[].oldText must match a unique, non-overlapping region of the original file. If two changes affect the same block or nearby lines, merge them into one edit instead of emitting overlapping edits. Do not include large unchanged regions just to connect distant changes.'
 
+const EDIT_SINGLE_DESC =
+  'Edit a single file using exact text replacement. Every old_string must match a unique, non-overlapping region of the file; set replace_all only when every occurrence should change. If several changes affect the same file, prefer one edit call; do not include large unchanged regions just to connect distant changes.'
+
 const PI_READ_DESC =
-  'Read the contents of a file. Supports text files and images (jpg, png, gif, webp, bmp). Images are sent as attachments. For text files, output is truncated to 2000 lines or 50KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete.'
+  'Read the contents of a file. For text files, output is truncated to 2000 lines or 50KB (whichever is hit first). Use offset/limit for large files; when you need the full file, continue with offset until complete.'
+
+const READ_DSH_DESC =
+  'Read the contents of a UTF-8 text file and return line-numbered content. Output is truncated to 2000 lines or 50KB (whichever is hit first); use offset/limit for large files and continue with offset until complete. Images are not supported here — use read_image for images.'
 
 const PI_WRITE_DESC =
   'Write content to a file. Creates the file if it doesn\'t exist, overwrites if it does. Automatically creates parent directories.'
 
-// dsh's own bash description carries sandbox/escalation policy that must not
-// be lost; keep pi's concise opener but retain the one critical rule.
-const PI_BASH_DESC =
-  'Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to the tail; full output is saved to a file when available. A denied command is final unless escalated with sandbox_permissions (see parameters).'
+const SANDBOX_LINE =
+  'A denied operation is final unless escalated with sandbox_permissions (see parameters).'
 
-const DESCRIPTIONS = {
-  read: PI_READ_DESC,
-  write: PI_WRITE_DESC,
-  bash: PI_BASH_DESC,
+function propsOf(tool) {
+  return tool?.parameters?.properties ?? {}
+}
+
+function buildBashDesc(props) {
+  const parts = [
+    'Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to the tail; full output is saved to a file when available.',
+  ]
+  if (props.workdir) parts.push('Pass `workdir` to run elsewhere (each call starts a fresh shell).')
+  if (props.timeoutMs) parts.push('Set `timeoutMs` to bound the command.')
+  if (props.run_in_background) {
+    parts.push('Set `run_in_background: true` for long-running commands; collect output with `job_output` and stop with `job_kill`.')
+  }
+  if (props.sandbox_permissions) parts.push('A denied command is final unless escalated with `sandbox_permissions` (see parameters).')
+  return parts.join(' ')
+}
+
+/** Generate the pi-style description for one assembled tool from its schema. */
+function alignTool(tool) {
+  const props = propsOf(tool)
+  switch (tool.name) {
+    case 'read':
+      return { ...tool, description: props.file_path ? READ_DSH_DESC : PI_READ_DESC }
+    case 'write':
+      return {
+        ...tool,
+        description: props.sandbox_permissions
+          ? `${PI_WRITE_DESC} ${SANDBOX_LINE}`
+          : PI_WRITE_DESC,
+      }
+    case 'bash':
+      return { ...tool, description: buildBashDesc(props) }
+    case 'edit':
+      if (props.edits) return { ...tool, description: PI_EDIT_DESC }
+      if (props.old_string) return { ...tool, description: EDIT_SINGLE_DESC }
+      return tool
+    default:
+      return tool
+  }
 }
 
 function editToolDefinition() {
@@ -150,18 +193,13 @@ export default {
       }
     })
 
-    // Align model-visible descriptions of the core tools with pi's wording.
+    // Align model-visible descriptions dynamically from the real schemas.
     ctx.on('system-prompt/assemble', async (assembly, _context, next) => {
       const assembled = await next()
       if (config.alignDescriptions === false) return assembled
       const tools = assembled?.tools
       if (!Array.isArray(tools)) return assembled
-      return {
-        ...assembled,
-        tools: tools.map((t) =>
-          DESCRIPTIONS[t.name] ? { ...t, description: DESCRIPTIONS[t.name] } : t,
-        ),
-      }
+      return { ...assembled, tools: tools.map(alignTool) }
     })
   },
 }
