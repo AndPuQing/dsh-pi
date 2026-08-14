@@ -21,6 +21,20 @@ dsh plugin --profile web add @dsh-pi/tools
 dsh web
 ```
 
+## Pre-made profile (one command)
+
+Instead of installing bundles one by one, create a ready-made dsh-pi profile:
+
+```sh
+./scripts/setup-profile.sh pi web          # registry mode (after npm publish)
+./scripts/setup-profile.sh pi web --local  # dev mode: point at this repo's packages/
+dsh --profile pi                            # boot the web UI with all three bundles
+```
+
+Also ships a headless variant: `./scripts/setup-profile.sh pi-headless headless` → `dsh --profile pi-headless "task"`.
+
+The generated profile lives in `$DSH_HOME/profiles/<name>`; override the persona via its `cordis.patch.yml`.
+
 Override the persona per-profile via `cordis.patch.yml`:
 
 ```yaml

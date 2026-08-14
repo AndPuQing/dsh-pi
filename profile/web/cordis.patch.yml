@@ -1,0 +1,6 @@
+# Your patch layer for this dsh-pi profile, applied after every bundle layer.
+# Override the persona here if you want:
+# - id: dsh-pi-prompt
+#   config:
+#     persona: "Your custom persona text"
+[]
