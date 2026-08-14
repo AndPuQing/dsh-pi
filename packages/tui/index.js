@@ -25,6 +25,8 @@ const home = process.env.DSH_HOME || path.join(os.homedir(), '.dsh')
 const PROF = 'pi-sdk'
 const profDir = path.join(home, 'profiles', PROF)
 const REGISTRY = 'https://registry.npmjs.org'
+const isBun = typeof Bun !== 'undefined' || !!process.versions?.bun
+const pkgRunner = isBun ? ['bunx', '--yes', 'pnpm'] : ['npx', '--yes', 'pnpm']
 const STATE_DIR = path.join(home, 'dsh-pi-tui')
 const plain = (s) => s
 
@@ -129,7 +131,7 @@ function ensureProfile() {
     path.join(profDir, 'cordis.patch.yml'),
     '# dsh-pi SDK runtime: serves stdio JSON-RPC for the terminal UI.\n- insert:\n    - id: sdk-jsonrpc-server\n      name: \'@deepseek-ai/dsh-sdk-jsonrpc-server\'\n      config: {}\n',
   )
-  const r = spawnSync('npx', ['--yes', 'pnpm', 'install', '--registry', REGISTRY], {
+  const r = spawnSync(pkgRunner[0], [...pkgRunner.slice(1), 'install', '--registry', REGISTRY], {
     cwd: profDir,
     stdio: 'inherit',
   })

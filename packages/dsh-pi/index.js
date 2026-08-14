@@ -16,6 +16,8 @@ import { createRequire } from 'node:module'
 const require = createRequire(import.meta.url)
 const home = process.env.DSH_HOME || path.join(os.homedir(), '.dsh')
 const REGISTRY = 'https://registry.npmjs.org'
+const isBun = typeof Bun !== 'undefined' || !!process.versions?.bun
+const pkgRunner = isBun ? ['bunx', '--yes', 'pnpm'] : ['npx', '--yes', 'pnpm']
 
 const HELP = `dsh-pi — pi on DeepSeek Harness
 
@@ -90,7 +92,7 @@ function setup(name, kind, opts = {}) {
     }, '# dsh-pi profile. Override the persona here:\n# - id: dsh-pi-prompt\n#   config:\n#     persona: "Your custom persona"\n[]\n')
   }
 
-  const r = spawnSync('npx', ['--yes', 'pnpm', 'install', '--registry', REGISTRY], {
+  const r = spawnSync(pkgRunner[0], [...pkgRunner.slice(1), 'install', '--registry', REGISTRY], {
     cwd: dest,
     stdio: opts.silent ? 'ignore' : 'inherit',
   })
