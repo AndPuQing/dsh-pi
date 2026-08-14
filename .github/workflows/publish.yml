@@ -1,0 +1,49 @@
+name: publish
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'packages/**'
+      - '.github/workflows/publish.yml'
+  workflow_dispatch: {}
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Validate sources
+        run: |
+          set -e
+          node --check packages/prompt/index.js
+          node --check packages/fff/index.js
+          node --check packages/tools/index.js
+
+      - name: Publish changed packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -e
+          for pkg in prompt fff tools; do
+            name="@dsh-pi/$pkg"
+            local="$(node -p "require('./packages/$pkg/package.json').version")"
+            published="$(npm view "$name" version 2>/dev/null || echo none)"
+            echo "::group::$name local=$local published=$published"
+            if [ "$published" = "none" ] || [ "$local" != "$published" ]; then
+              npm publish --workspace "$name" --access public
+              echo "published $name@$local"
+            else
+              echo "skipping $name@$local (already published)"
+            fi
+            echo "::endgroup::"
+          done
