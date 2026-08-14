@@ -22,6 +22,7 @@ import {
 } from '@deepseek-ai/dsh-app-boot'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { zstdDecompressSync } from 'node:zlib'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import {
   Editor,
@@ -301,6 +302,36 @@ function setupUi(runtimeRef) {
         else showTools = !showTools
         rebuild(); addMessage('sys', `tool details: ${showTools ? 'on' : 'off'}`)
         return true
+      case '/sessions': {
+        const n = Number(arg)
+        if (n && Number.isInteger(n) && n >= 1) {
+          runtimeRef.listSessions?.().then(async (list) => {
+            const pick = list[n - 1]
+            if (!pick) { addMessage('sys', 'no session #' + n); return }
+            setStatus('… switching to ' + pick.title + '…')
+            try {
+              const r = await runtimeRef.switchSession(pick.id)
+              if (r.already) { addMessage('sys', 'already on this session'); setStatus('ready'); return }
+              messages.length = 0
+              currentAsst = null
+              asstText = ''
+              for (const m of runtimeRef.conversationHistory(r.agent)) addMessage(m.kind, m.text)
+              addMessage('sys', 'switched to: ' + pick.title)
+              setStatus('ready')
+            } catch (e) {
+              addMessage('sys', 'switch failed: ' + e.message)
+              setStatus('ready')
+            }
+          })
+        } else {
+          runtimeRef.listSessions?.().then((list) => {
+            if (!list.length) { addMessage('sys', 'no sessions yet'); return }
+            const lines = list.map((x, i) => `${i + 1}. ${x.title} ${x.current ? '(current)' : ''} (${x.id.slice(0, 12)}…)`).join('\n')
+            addMessage('sys', 'sessions (use /sessions <n> to switch):\n' + lines)
+          })
+        }
+        return true
+      }
       case '/new':
         runtimeRef.newSession?.(); addMessage('sys', 'new session'); return true
       case '/quit':
@@ -321,7 +352,11 @@ function setupUi(runtimeRef) {
       return
     }
     addMessage('user', t)
-    runtimeRef.prompt(t)
+    try {
+      runtimeRef.prompt(t)
+    } catch (e) {
+      addMessage('sys', '! ' + e.message)
+    }
   }
 
   editor.onSubmit = (text) => {
@@ -378,15 +413,18 @@ async function main() {
     const selection = defaultModel.currentSelection()
     let agent = null
 
-    function createAgent() {
+    function createAgentWithId(sessionId) {
       return agents.create({
-        sessionId: SessionId(`session-${randomUUID()}`),
+        sessionId: SessionId(sessionId),
         meta: { cwd: process.cwd() },
         agentOptions: { provider: selection.provider, model: selection.model },
         setup: (agentCtx) => {
           installModelSelection(agentCtx, { current: selection, assembled: void 0 })
         },
       })
+    }
+    function createAgent() {
+      return createAgentWithId(`session-${randomUUID()}`)
     }
 
     const created = await createAgent()
@@ -409,6 +447,81 @@ async function main() {
       newSession() {
         createAgent().then((c) => { agent = c.agent; return agent.whenIdle() })
       },
+      async listSessions() {
+        // dsh's project-key: separators -> '-', unsafe chars -> ~XXXX, wrapped in --..--
+        const cwd = process.cwd()
+        let readable = ''
+        let sep = false
+        for (let i = 0; i < cwd.length; i++) {
+          const code = cwd.charCodeAt(i)
+          const ch = cwd[i]
+          if (ch === '/' || ch === '\\' || ch === ':') {
+            if (!sep) readable += '-'
+            sep = true
+          } else if (ch !== '~' && /^[A-Za-z0-9._-]$/.test(ch)) {
+            readable += ch
+            sep = false
+          } else {
+            readable += '~' + code.toString(16).toUpperCase().padStart(4, '0')
+            sep = false
+          }
+        }
+        const key = `--${(readable.replace(/^-+/, '') || 'root').slice(0, 251)}--`
+        const root = path.join(home, 'sessions', key)
+        let dirs = []
+        try { dirs = fs.readdirSync(root, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name) } catch { return [] }
+        const out = []
+        for (const dir of dirs) {
+          const file = path.join(root, dir, 'session.jsonl.zstd')
+          let title = dir
+          let createdAt = 0
+          try {
+            const raw = zstdDecompressSync(fs.readFileSync(file))
+            const text = raw.toString('utf8')
+            const first = text.indexOf('\n')
+            const head = JSON.parse(text.slice(0, first))
+            createdAt = head.createdAt || 0
+            const ti = text.indexOf('"type":"session/title"')
+            if (ti !== -1) {
+              const tm = text.indexOf('"title":"', ti)
+              if (tm !== -1) {
+                const start = tm + 9
+                const end = text.indexOf('"', start)
+                if (end !== -1 && end > start) title = text.slice(start, end)
+              }
+            }
+          } catch { /* skip unreadable */ }
+          out.push({ id: dir, title, createdAt, current: agent?.session?.id === dir })
+        }
+        out.sort((a, b) => b.createdAt - a.createdAt)
+        return out
+      },
+      async switchSession(sessionId) {
+        if (agent && agent.session.id === sessionId) return { agent, already: true }
+        let created
+        try {
+          created = await createAgentWithId(sessionId)
+        } catch (e) {
+          if (String(e.message).includes('already exists')) throw new Error('session is in use (current or another live one)')
+          throw e
+        }
+        agent = created.agent
+        await agent.whenIdle()
+        return { agent }
+      },
+      conversationHistory(agentObj) {
+        const msgs = []
+        for (const e of agentObj.session.events) {
+          if (e.type === 'user/message') {
+            const txt = (e.data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('')
+            if (txt) msgs.push({ kind: 'user', text: txt })
+          } else if (e.type === 'assistant/message') {
+            const txt = (e.data.message?.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('')
+            if (txt) msgs.push({ kind: 'asst', text: txt })
+          }
+        }
+        return msgs
+      },
       dispose() {
         try { ctx.fiber?.dispose?.() } catch { /* best effort */ }
       },
@@ -416,7 +529,7 @@ async function main() {
   }
 
   // UI first: instant; boot the runtime in the background
-  const runtimeRef = { ready: false, prompt: null, newSession: null, dispose: null, onEvent: null }
+  const runtimeRef = { ready: false, prompt: null, newSession: null, listSessions: null, switchSession: null, conversationHistory: null, dispose: null, onEvent: null }
   const ui = setupUi(runtimeRef)
   ui.setStarting()
   ;(async () => {
@@ -425,6 +538,9 @@ async function main() {
       const runtime = await buildRuntime()
       runtimeRef.prompt = runtime.prompt
       runtimeRef.newSession = runtime.newSession
+      runtimeRef.listSessions = runtime.listSessions
+      runtimeRef.switchSession = runtime.switchSession
+      runtimeRef.conversationHistory = runtime.conversationHistory
       runtimeRef.dispose = runtime.dispose
       runtime.onEvent((session, event) => ui.renderEvent(session, event))
       saveSessionId(runtime.sessionId)
