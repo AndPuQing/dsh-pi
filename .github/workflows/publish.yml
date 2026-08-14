@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write
+      id-token: write # Trusted Publishing: npm exchanges the OIDC token (no NPM_TOKEN secret)
     steps:
       - uses: actions/checkout@v4
 
@@ -30,8 +30,6 @@ jobs:
           node --check packages/tools/index.js
 
       - name: Publish changed packages
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -e
           for pkg in prompt fff tools; do
@@ -40,7 +38,7 @@ jobs:
             published="$(npm view "$name" version 2>/dev/null || echo none)"
             echo "::group::$name local=$local published=$published"
             if [ "$published" = "none" ] || [ "$local" != "$published" ]; then
-              npm publish --workspace "$name" --access public
+              npm publish --workspace "$name" --provenance --access public
               echo "published $name@$local"
             else
               echo "skipping $name@$local (already published)"
