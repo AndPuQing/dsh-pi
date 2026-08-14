@@ -1,6 +1,6 @@
 {
   "name": "@dsh-pi/tui",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Terminal UI for dsh-pi — drives the dsh-pi SDK runtime over stdio JSON-RPC (v0: readline shell)",
   "type": "module",
   "main": "./index.js",

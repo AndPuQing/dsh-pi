@@ -25,10 +25,12 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { zstdDecompressSync } from 'node:zlib'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import {
+  CombinedAutocompleteProvider,
   Editor,
   Markdown,
   ProcessTerminal,
   ScrollView,
+  SelectList,
   Text,
   TuiMainScreen,
   VStack,
@@ -93,7 +95,13 @@ const THEMES = {
       underline: (s) => `\x1b[4m${s}\x1b[0m`,
       highlightCode: createHighlightCode((s) => `\x1b[36m${s}\x1b[0m`),
     },
-    editor: { borderColor: (s) => `\x1b[90m${s}\x1b[0m`, selectList: {} },
+    editor: { borderColor: (s) => `\x1b[90m${s}\x1b[0m`, selectList: {
+      selectedPrefix: (s) => `\x1b[36m❯ ${s}\x1b[0m`,
+      selectedText: (s) => `\x1b[1m${s}\x1b[0m`,
+      description: (s) => `\x1b[90m${s}\x1b[0m`,
+      scrollInfo: (s) => `\x1b[90m${s}\x1b[0m`,
+      noMatch: (s) => `\x1b[90m${s}\x1b[0m`,
+    } },
     user: (s) => `\x1b[94m❯\x1b[0m ${s}`,
     tool: (s) => `\x1b[36m⚙ ${s}\x1b[0m`,
     result: (s) => `\x1b[32m✓\x1b[0m ${s}`,
@@ -120,7 +128,13 @@ const THEMES = {
       underline: (s) => `\x1b[4m${s}\x1b[0m`,
       highlightCode: createHighlightCode((s) => `\x1b[34m${s}\x1b[0m`),
     },
-    editor: { borderColor: (s) => `\x1b[34m${s}\x1b[0m`, selectList: {} },
+    editor: { borderColor: (s) => `\x1b[34m${s}\x1b[0m`, selectList: {
+      selectedPrefix: (s) => `\x1b[36m❯ ${s}\x1b[0m`,
+      selectedText: (s) => `\x1b[1m${s}\x1b[0m`,
+      description: (s) => `\x1b[90m${s}\x1b[0m`,
+      scrollInfo: (s) => `\x1b[90m${s}\x1b[0m`,
+      noMatch: (s) => `\x1b[90m${s}\x1b[0m`,
+    } },
     user: (s) => `\x1b[34m❯\x1b[0m ${s}`,
     tool: (s) => `\x1b[34m⚙ ${s}\x1b[0m`,
     result: (s) => `\x1b[32m✓\x1b[0m ${s}`,
@@ -223,6 +237,21 @@ function setupUi(runtimeRef) {
   tui.addChild(new VStack([scroll, editor, statusText]))
   tui.start()
   tui.setFocus(editor)
+
+  // pi-tui built-ins: slash-command + file-path autocomplete on the editor
+  const autocomplete = new CombinedAutocompleteProvider(
+    [
+      { name: 'help', description: 'show help' },
+      { name: 'clear', description: 'clear the conversation view' },
+      { name: 'theme', description: 'switch theme', argumentHint: '<name>', getArgumentCompletions: () => Object.keys(THEMES).map((n) => ({ value: n, label: n })) },
+      { name: 'tools', description: 'fold/unfold tool details', argumentHint: '[on|off]' },
+      { name: 'sessions', description: 'list or switch sessions', argumentHint: '<n>' },
+      { name: 'new', description: 'start a fresh session' },
+      { name: 'quit', description: 'leave' },
+    ],
+    process.cwd(),
+  )
+  editor.setAutocompleteProvider(autocomplete)
 
   function setStatus(str) {
     statusText.setText(theme.status(str))
@@ -347,8 +376,29 @@ function setupUi(runtimeRef) {
         } else {
           runtimeRef.listSessions?.().then((list) => {
             if (!list.length) { addMessage('sys', 'no sessions yet'); return }
-            const lines = list.map((x, i) => `${i + 1}. ${x.title} ${x.current ? '(current)' : ''} (${x.id.slice(0, 12)}…)`).join('\n')
-            addMessage('sys', 'sessions (use /sessions <n> to switch):\n' + lines)
+            const dim = (s) => `\x1b[90m${s}\x1b[0m`
+            const sel = new SelectList(
+              list.map((x) => ({ label: x.title + (x.current ? ' (current)' : ''), value: x.id, description: x.id })),
+              10,
+              {
+                selectedPrefix: (s) => `\x1b[36m❯ ${s}\x1b[0m`,
+                selectedText: (s) => `\x1b[1m${s}\x1b[0m`,
+                description: dim,
+                scrollInfo: dim,
+                noMatch: dim,
+              },
+            )
+            sel.onSelect = (item) => {
+              tui.hideOverlay()
+              tui.setFocus(editor)
+              submit('/sessions ' + (list.findIndex((x) => x.id === item.value) + 1))
+            }
+            sel.onCancel = () => {
+              tui.hideOverlay()
+              tui.setFocus(editor)
+            }
+            tui.showOverlay(sel)
+            tui.setFocus(sel)
           })
         }
         return true
