@@ -1,0 +1,27 @@
+# @dsh-pi/tui
+
+Terminal UI for dsh-pi. **v0**: a readline-based interactive shell that drives the dsh-pi SDK runtime over stdio JSON-RPC — prompt → stream assistant text + tool calls → repeat.
+
+## Usage
+
+```sh
+dsh-pi-tui            # requires dsh on PATH
+```
+
+First run auto-creates the `pi-sdk` profile (`$DSH_HOME/profiles/pi-sdk`: base + @dsh-pi/prompt + fff + tools + the SDK JSON-RPC server) and installs its dependencies via `npx pnpm`.
+
+Controls: type a prompt and Enter; `exit` / `/quit` / Ctrl-C to leave. Each run uses a fresh session (interrupted runs can leave a wedged resume state — session continuity is a v2 item).
+
+## Env
+
+- `DSH_PI_PROVIDER` / `DSH_PI_MODEL` — override the model route (default: `agent-default-model` from `$DSH_HOME/settings.yaml`, else `opencode-go` / `deepseek-v4-flash`)
+- `DSH_HOME` — harness home (default `~/.dsh`)
+
+## Roadmap
+
+- v1: render with `@earendil-works/pi-tui` (Editor + Markdown + ScrollView) for the pi look
+- v2: session tree navigation, keybindings, themes
+
+## License
+
+MIT

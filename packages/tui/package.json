@@ -1,0 +1,27 @@
+{
+  "name": "@dsh-pi/tui",
+  "version": "0.1.0",
+  "description": "Terminal UI for dsh-pi — drives the dsh-pi SDK runtime over stdio JSON-RPC (v0: readline shell)",
+  "type": "module",
+  "main": "./index.js",
+  "bin": {
+    "dsh-pi-tui": "./index.js"
+  },
+  "files": [
+    "index.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "pi",
+    "tui",
+    "terminal"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AndPuQing/dsh-pi.git"
+  }
+}
