@@ -1,24 +1,34 @@
 #!/usr/bin/env node
-// @dsh-pi/tui — v0 terminal shell for dsh-pi.
+// @dsh-pi/tui — v1: pi-style terminal UI for dsh-pi.
 //
-// Drives the dsh-pi SDK runtime (profile `pi-sdk`) over stdio JSON-RPC:
-//   - self-contained: creates the pi-sdk profile + installs deps on first run
-//   - readline loop: prompt → session/prompt → stream assistant text & tool calls
+// Renders with @earendil-works/pi-tui (Editor input, Markdown messages,
+// auto-scrolling ScrollView) while driving the dsh-pi SDK runtime
+// (`pi-sdk` profile) over stdio JSON-RPC.
 //
 // Env:
-//   DSH_PI_PROVIDER / DSH_PI_MODEL — override the model route (default: read
-//   from $DSH_HOME/settings.yaml agent-default-model, else opencode-go /
-//   deepseek-v4-flash).
+//   DSH_BIN              dsh binary (default: PATH, then npx @deepseek-ai/dsh)
+//   DSH_PI_PROVIDER/DSH_PI_MODEL  model route override (default: settings.yaml
+//                                  agent-default-model, else opencode-go/…)
 import { spawn, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import readline from 'node:readline'
+import {
+  Editor,
+  Markdown,
+  ProcessTerminal,
+  ScrollView,
+  Text,
+  TuiMainScreen,
+  VStack,
+} from '@earendil-works/pi-tui'
 
 const home = process.env.DSH_HOME || path.join(os.homedir(), '.dsh')
 const PROF = 'pi-sdk'
 const profDir = path.join(home, 'profiles', PROF)
 const REGISTRY = 'https://registry.npmjs.org'
+
+// ---- model route ----------------------------------------------------------
 
 function defaultModel() {
   const envP = process.env.DSH_PI_PROVIDER
@@ -26,13 +36,16 @@ function defaultModel() {
   try {
     const s = fs.readFileSync(path.join(home, 'settings.yaml'), 'utf8')
     const m = s.match(/agent-default-model:\s*\n(\s+provider:\s*(\S+)\s*\n)?(\s+model:\s*(\S+))/)
-    const provider = envP || m?.[2] || 'opencode-go'
-    const model = envM || m?.[4] || 'deepseek-v4-flash'
-    return { provider, model }
+    return {
+      provider: envP || m?.[2] || 'opencode-go',
+      model: envM || m?.[4] || 'deepseek-v4-flash',
+    }
   } catch {
     return { provider: envP || 'opencode-go', model: envM || 'deepseek-v4-flash' }
   }
 }
+
+// ---- profile setup ---------------------------------------------------------
 
 function ensureProfile() {
   if (fs.existsSync(profDir)) return
@@ -50,12 +63,7 @@ function ensureProfile() {
     },
     dsh: {
       profile: {
-        bundles: [
-          '@deepseek-ai/dsh-base',
-          '@dsh-pi/prompt',
-          '@dsh-pi/fff',
-          '@dsh-pi/tools',
-        ],
+        bundles: ['@deepseek-ai/dsh-base', '@dsh-pi/prompt', '@dsh-pi/fff', '@dsh-pi/tools'],
       },
     },
   }
@@ -78,11 +86,12 @@ function ensureProfile() {
   }
 }
 
+// ---- JSON-RPC runtime -------------------------------------------------------
+
 function resolveDsh() {
   if (process.env.DSH_BIN) return { cmd: process.env.DSH_BIN, args: [] }
   const onPath = spawnSync('sh', ['-c', 'command -v dsh'], { encoding: 'utf8' })
   if (onPath.status === 0 && onPath.stdout.trim()) return { cmd: onPath.stdout.trim(), args: [] }
-  // fallback: fetch the published dsh binary via npx
   return { cmd: 'npx', args: ['--yes', '@deepseek-ai/dsh'] }
 }
 
@@ -127,113 +136,158 @@ function startRuntime() {
   return { child, request, onMessage: (h) => handlers.push(h) }
 }
 
-function makeRenderer() {
-  let inText = false
-  return {
-    onEvent(msg) {
-      if (msg.method !== 'session.event') return
-      const ev = msg.params.event
-      if (ev.type === 'assistant/chunk') {
-        const chunk = ev.data.chunk || {}
-        if (chunk.type === 'block-start' && chunk.blockType === 'text') inText = true
-        else if (chunk.type === 'text-delta' && inText) process.stdout.write(chunk.text)
-        else if (chunk.type === 'block-end') {
-          inText = false
-          process.stdout.write('\n')
-        }
-      } else if (ev.type === 'tool/call') {
-        let a = ev.data.arguments || ''
-        try {
-          a = JSON.stringify(JSON.parse(a)).slice(0, 140)
-        } catch {
-          a = String(a).slice(0, 140)
-        }
-        process.stdout.write(`\n  ⚙ ${ev.data.name} ${a}\n`)
-      } else if (ev.type === 'tool/result') {
-        const parts = ev.data.message?.content || []
-        const txt = parts.find((p) => p.type === 'text' && p.text)?.text || ''
-        if (txt) process.stdout.write(`  ✓ ${txt.split('\n')[0].slice(0, 140)}\n`)
-      } else if (ev.type === 'turn/end') {
-        process.stdout.write('\n')
-      }
-    },
-  }
+// ---- themes ----------------------------------------------------------------
+
+const plain = (s) => s
+const markdownTheme = {
+  heading: (s) => `\x1b[1m${s}\x1b[0m`,
+  link: plain,
+  linkUrl: plain,
+  code: (s) => `\x1b[36m${s}\x1b[0m`,
+  codeBlock: (s) => `\x1b[36m${s}\x1b[0m`,
+  codeBlockBorder: plain,
+  quote: plain,
+  quoteBorder: plain,
+  hr: plain,
+  listBullet: (s) => `\x1b[90m${s}\x1b[0m`,
+  bold: (s) => `\x1b[1m${s}\x1b[0m`,
+  italic: (s) => `\x1b[3m${s}\x1b[0m`,
+  strikethrough: plain,
+  underline: (s) => `\x1b[4m${s}\x1b[0m`,
 }
+const editorTheme = {
+  borderColor: (s) => `\x1b[90m${s}\x1b[0m`,
+  selectList: {},
+}
+const defaultTextStyle = {}
 
-async function main() {
-  ensureProfile()
-  const { child, request, onMessage } = startRuntime()
-  const renderer = makeRenderer()
-  onMessage(renderer.onEvent)
+// ---- UI ---------------------------------------------------------------------
 
-  const { provider, model } = defaultModel()
-  let init = null
-  for (let attempt = 1; attempt <= 30; attempt++) {
-    try {
-      init = await request('initialize', { cwd: process.cwd(), provider, model })
-      break
-    } catch (e) {
-      if (attempt === 30) {
-        console.error(`[dsh-pi-tui] initialize failed: ${e.message}`)
-        child.kill()
-        process.exit(1)
-      }
-      await new Promise((r) => setTimeout(r, 1000)) // runtime still booting
+function setupUi({ request, onMessage, sessionId }) {
+  const terminal = new ProcessTerminal()
+  const tui = new TuiMainScreen(terminal)
+
+  const messages = new VStack([])
+  const scroll = new ScrollView(messages, { follow: 'end', primary: true })
+  const editor = new Editor(tui, editorTheme)
+  tui.addChild(new VStack([scroll, editor]))
+  tui.start()
+  tui.setFocus(editor)
+
+  let busy = false
+  let currentAsst = null
+  let asstText = ''
+  let inText = false
+
+  function upsertAsst() {
+    // replace the in-progress assistant message with the accumulated text
+    if (currentAsst) messages.removeChild(currentAsst)
+    if (asstText) {
+      currentAsst = new Markdown(asstText, 1, 0, markdownTheme, defaultTextStyle)
+      messages.addChild(currentAsst)
+    } else {
+      currentAsst = null
     }
+    tui.requestRender()
   }
-  console.error(`[dsh-pi-tui] runtime ${init.serverInfo.name} ready (${provider}/${model}) — type a prompt, Ctrl-C to exit`)
-  // settle: let the agent + adapter finish booting before the first prompt
-  // (an early prompt can be swallowed as an empty turn)
-  await new Promise((r) => setTimeout(r, 2500))
 
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
-  // unique session per run: interrupted runs leave a wedged resume state
-  const sessionId = 'tui-' + Date.now()
-  let turnActive = false
-  let inputClosed = false
-  let shutting = false
-  const shutdown = async () => {
-    if (shutting) return
-    shutting = true
-    const deadline = Date.now() + 60000
-    while (turnActive && Date.now() < deadline) await new Promise((r) => setTimeout(r, 200))
-    request('shutdown').catch(() => {})
-    setTimeout(() => child.kill(), 500)
-    process.exit(0)
+  editor.onSubmit = (text) => {
+    const t = text.trim()
+    if (!t) return
+    if (t === 'exit' || t === '/quit') {
+      shutdown()
+      return
+    }
+    messages.addChild(new Text(`\x1b[90m❯\x1b[0m ${t}`))
+    busy = true
+    request('session/prompt', { sessionId, contentBlocks: [{ type: 'text', text: t }] }).catch(
+      (e) => {
+        messages.addChild(new Text(`\x1b[31m! ${e.message}\x1b[0m`))
+        busy = false
+        tui.requestRender()
+      },
+    )
+    tui.requestRender()
   }
-  process.on('SIGINT', shutdown)
-  rl.on('close', () => {
-    inputClosed = true
-    shutdown()
-  })
+
   onMessage((msg) => {
     if (process.env.DSH_PI_DEBUG && msg.method === 'session.event') {
       process.stderr.write(`[dbg] ${msg.params.event.type}\n`)
     }
     if (msg.method !== 'session.event') return
     const ev = msg.params.event
-    if (ev.type === 'turn/start') turnActive = true
-    if (ev.type === 'turn/end') turnActive = false
+    const d = ev.data || {}
+    if (ev.type === 'assistant/chunk') {
+      const chunk = d.chunk || {}
+      if (chunk.type === 'block-start' && chunk.blockType === 'text') inText = true
+      else if (chunk.type === 'text-delta' && inText) {
+        asstText += chunk.text
+        upsertAsst()
+      } else if (chunk.type === 'block-end') {
+        inText = false
+      }
+    } else if (ev.type === 'tool/call') {
+      let a = d.arguments || ''
+      try {
+        a = JSON.stringify(JSON.parse(a)).slice(0, 140)
+      } catch {
+        a = String(a).slice(0, 140)
+      }
+      messages.addChild(new Text(`\x1b[36m⚙ ${d.name}\x1b[0m ${a}`))
+      tui.requestRender()
+    } else if (ev.type === 'tool/result') {
+      const parts = d.message?.content || []
+      const txt = parts.find((p) => p.type === 'text' && p.text)?.text || ''
+      if (txt) {
+        messages.addChild(new Text(`\x1b[32m✓\x1b[0m ${txt.split('\n')[0].slice(0, 140)}`))
+        tui.requestRender()
+      }
+    } else if (ev.type === 'turn/end') {
+      busy = false
+    }
   })
 
-  const ask = () => {
-    if (inputClosed) return
-    rl.question('❯ ', async (line) => {
-      const text = line.trim()
-      if (!text) return ask()
-      if (text === '/quit' || text === 'exit') return shutdown()
-      turnActive = true
-      await request('session/prompt', {
-        sessionId,
-        contentBlocks: [{ type: 'text', text }],
-      }).catch((e) => {
-        console.error('prompt error:', e.message)
-        turnActive = false
-      })
-      ask()
-    })
+  let shutting = false
+  const shutdown = () => {
+    if (shutting) return
+    shutting = true
+    tui.stop()
+    request('shutdown').catch(() => {})
+    setTimeout(() => terminal.release?.() ?? 0, 0)
+    process.exit(0)
   }
-  ask()
+  process.on('SIGINT', shutdown)
+  process.on('SIGTERM', shutdown)
+  tui.start()
+  return { tui, shutdown }
+}
+
+// ---- main -------------------------------------------------------------------
+
+async function main() {
+  ensureProfile()
+  const { child, request, onMessage } = startRuntime()
+  const sessionId = 'tui-' + Date.now()
+  const { provider, model } = defaultModel()
+
+  let init = null
+  for (let attempt = 1; attempt <= 30; attempt++) {
+    try {
+      init = await request('initialize', { cwd: process.cwd(), provider, model })
+      break
+    } catch {
+      await new Promise((r) => setTimeout(r, 1000))
+    }
+  }
+  if (!init) {
+    console.error('[dsh-pi-tui] initialize failed — runtime did not come up')
+    child.kill()
+    process.exit(1)
+  }
+  // settle so the first prompt is not swallowed as an empty turn
+  await new Promise((r) => setTimeout(r, 2500))
+
+  setupUi({ request, onMessage, sessionId })
 }
 
 main()
