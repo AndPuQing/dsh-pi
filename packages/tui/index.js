@@ -225,10 +225,12 @@ function saveSessionId(id) {
 
 // ---- UI ------------------------------------------------------------------------
 
-function setupUi(runtimeRef) {
+function setupUi(runtimeRef, modelInfo) {
   const terminal = new ProcessTerminal()
   const tui = new TuiMainScreen(terminal)
   let theme = THEMES[process.env.DSH_PI_THEME] || THEMES.default
+  // model/session info is always visible in the status line
+  const runtimeInfo = { provider: modelInfo?.provider || '', model: modelInfo?.model || '' }
   let showTools = true
   const messages = []
   let currentAsst = null
@@ -280,19 +282,41 @@ function setupUi(runtimeRef) {
   )
 
   let busy = false
+  let statusState = ''
+  function composeStatus(str) {
+    const parts = []
+    if (runtimeInfo.model) parts.push(`${runtimeInfo.provider}/${runtimeInfo.model}`)
+    if (runtimeRef.sessionId) {
+      const short = String(runtimeRef.sessionId).replace(/^session-/, '').slice(0, 8)
+      parts.push(`session ${short}`)
+    }
+    parts.push(str)
+    return parts.join(' · ')
+  }
   function setStatus(str) {
     // idle/static status: hide the spinner, show plain text
     busy = false
+    statusState = str
     statusLoader.setIndicator({ frames: [] })
-    statusLoader.setMessage(str)
+    statusLoader.setMessage(composeStatus(str))
     tui.requestRender()
   }
   function setBusy(str) {
     // turn in flight: pi-tui spinner + message
     busy = true
+    statusState = str
     statusLoader.setIndicator()
-    statusLoader.setMessage(str)
+    statusLoader.setMessage(composeStatus(str))
     tui.requestRender()
+  }
+  function refreshStatus() {
+    if (busy) setBusy(statusState)
+    else setStatus(statusState)
+  }
+  function setModelInfo(provider, model) {
+    runtimeInfo.provider = provider
+    runtimeInfo.model = model
+    refreshStatus()
   }
 
   function addMessage(kind, text) {
@@ -330,32 +354,63 @@ function setupUi(runtimeRef) {
     tui.requestRender()
   }
   function upsertAsst() {
-    if (currentAsst) container.removeChild(currentAsst)
+    // reuse the mounted component (setText) — only create/remove on transitions
     if (asstText) {
-      currentAsst = new Markdown(asstText, 1, 0, theme.markdown, {})
-      container.addChild(currentAsst)
-    } else {
+      if (currentAsst) {
+        currentAsst.setText(asstText)
+      } else {
+        currentAsst = new Markdown(asstText, 1, 0, theme.markdown, {})
+        container.addChild(currentAsst)
+      }
+    } else if (currentAsst) {
+      container.removeChild(currentAsst)
       currentAsst = null
     }
     tui.requestRender()
+  }
+
+  // Markdown re-parse on every text-delta is the streaming hot path; coalesce
+  // bursts into at most ~30 rebuilds/sec and always flush the final frame.
+  let asstTimer = null
+  function scheduleAsst() {
+    if (asstTimer) return
+    asstTimer = setTimeout(() => {
+      asstTimer = null
+      upsertAsst()
+    }, 33)
+  }
+  function flushAsst() {
+    if (!asstTimer) return
+    clearTimeout(asstTimer)
+    asstTimer = null
+    upsertAsst()
+  }
+  function cancelAsst() {
+    if (asstTimer) {
+      clearTimeout(asstTimer)
+      asstTimer = null
+    }
   }
 
   // live session-event stream from the in-process runtime
   function renderEvent(session, event) {
     const d = event.data || {}
     if (event.type === 'turn/start') setBusy('busy…')
-    if (event.type === 'turn/end') setStatus('ready')
+    if (event.type === 'turn/end') {
+      flushAsst()
+      setStatus('ready')
+    }
     if (event.type === 'assistant/chunk') {
       const chunk = d.chunk || {}
       if (chunk.type === 'block-start' && chunk.blockType === 'text') inText = true
       else if (chunk.type === 'text-delta' && inText) {
         asstText += chunk.text
-        upsertAsst()
+        scheduleAsst()
       } else if (chunk.type === 'block-end') inText = false
     } else if (event.type === 'tool/call') {
       // surface the running tool in the spinner line (animation keeps going)
       if (busy) {
-        statusLoader.setMessage(`⚙ ${d.name}…`)
+        statusLoader.setMessage(composeStatus(`⚙ ${d.name}…`))
         tui.requestRender()
       }
       let a = d.arguments || ''
@@ -385,7 +440,7 @@ keys:
   Ctrl+C  copy selection / cancel`
 
   function clearView() {
-    messages.length = 0; currentAsst = null; asstText = ''; rebuild()
+    cancelAsst(); messages.length = 0; currentAsst = null; asstText = ''; rebuild()
   }
   function cycleTheme() {
     const names = Object.keys(THEMES)
@@ -420,6 +475,7 @@ keys:
             try {
               const r = await runtimeRef.switchSession(pick.id)
               if (r.already) { addMessage('sys', 'already on this session'); setStatus('ready'); return }
+              cancelAsst()
               messages.length = 0
               currentAsst = null
               asstText = ''
@@ -462,7 +518,7 @@ keys:
         return true
       }
       case '/new':
-        runtimeRef.newSession?.(); addMessage('sys', 'new session'); return true
+        cancelAsst(); runtimeRef.newSession?.(); addMessage('sys', 'new session'); return true
       case '/quit':
       case 'exit':
         shutdown(); return true
@@ -526,6 +582,8 @@ keys:
       setStatus('ready — type a prompt')
       for (const q of queue.splice(0)) submit(q)
     },
+    refreshStatus,
+    setModelInfo,
     fail(message) {
       addMessage('sys', '! startup failed: ' + message)
     },
@@ -567,6 +625,8 @@ async function main() {
     const sessionId = agent.session.id
     return {
       ctx,
+      provider: selection.provider,
+      model: selection.model,
       get sessionId() { return agent.session.id },
       onEvent(cb) {
         ctx.on('session/event', (session, event) => {
@@ -578,7 +638,13 @@ async function main() {
         agent.followup(createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }))
       },
       newSession() {
-        createAgent().then((c) => { agent = c.agent; return agent.whenIdle() })
+        createAgent().then((c) => {
+          agent = c.agent
+          return agent.whenIdle()
+        }).then(() => {
+          runtimeRef.sessionId = agent.session.id
+          runtimeRef.refreshStatus?.()
+        })
       },
       async listSessions() {
         // dsh's project-key: separators -> '-', unsafe chars -> ~XXXX, wrapped in --..--
@@ -640,6 +706,8 @@ async function main() {
         }
         agent = created.agent
         await agent.whenIdle()
+        runtimeRef.sessionId = agent.session.id
+        runtimeRef.refreshStatus?.()
         return { agent }
       },
       conversationHistory(agentObj) {
@@ -662,8 +730,9 @@ async function main() {
   }
 
   // UI first: instant; boot the runtime in the background
-  const runtimeRef = { ready: false, prompt: null, newSession: null, listSessions: null, switchSession: null, conversationHistory: null, dispose: null, onEvent: null }
-  const ui = setupUi(runtimeRef)
+  const runtimeRef = { ready: false, sessionId: null, prompt: null, newSession: null, listSessions: null, switchSession: null, conversationHistory: null, dispose: null, onEvent: null, refreshStatus: null }
+  const ui = setupUi(runtimeRef, { provider, model })
+  runtimeRef.refreshStatus = () => ui.refreshStatus()
   ui.setStarting()
   ;(async () => {
     try {
@@ -675,8 +744,10 @@ async function main() {
       runtimeRef.switchSession = runtime.switchSession
       runtimeRef.conversationHistory = runtime.conversationHistory
       runtimeRef.dispose = runtime.dispose
+      runtimeRef.sessionId = runtime.sessionId
       runtime.onEvent((session, event) => ui.renderEvent(session, event))
       saveSessionId(runtime.sessionId)
+      ui.setModelInfo(runtime.provider, runtime.model)
       ui.setReady()
     } catch (e) {
       ui.fail(e.message)
