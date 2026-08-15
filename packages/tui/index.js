@@ -437,7 +437,8 @@ keys:
   Ctrl+K  clear the conversation view
   Ctrl+Q  quit
   Ctrl+L  clear (alias of Ctrl+K)
-  Ctrl+C  copy selection / cancel`
+  Ctrl+C  copy selection / cancel
+  ↑/↓     browse input history`
 
   function clearView() {
     cancelAsst(); messages.length = 0; currentAsst = null; asstText = ''; rebuild()
@@ -545,6 +546,8 @@ keys:
   }
 
   editor.onSubmit = (text) => {
+    // feed the editor's built-in prompt history (↑/↓ browsable, pi-style)
+    editor.addToHistory(text)
     submit(text)
     tui.requestRender()
   }

@@ -21,6 +21,7 @@ Shortcuts (registered via pi-tui `KeybindingsManager`, ids mirror pi's `app.*` d
 | `Ctrl+K` | clear the conversation view (shadows the editor's kill-to-line-end) |
 | `Ctrl+Q` | quit |
 | `Ctrl+L` | clear (legacy alias) |
+| `↑` / `↓` | browse input history (per-session, in-memory) |
 
 ## Env
 
