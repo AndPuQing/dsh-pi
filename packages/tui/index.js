@@ -10,6 +10,7 @@
 // Shortcuts: Ctrl+N new session · Ctrl+T theme · Ctrl+K clear · Ctrl+Q quit
 // Env: DSH_BIN unused here; DSH_PI_PROVIDER/DSH_PI_MODEL override the route.
 import { spawnSync } from 'node:child_process'
+import { Buffer } from 'node:buffer'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -29,6 +30,7 @@ import {
   CombinedAutocompleteProvider,
   Editor,
   getKeybindings,
+  Image,
   KeybindingsManager,
   Loader,
   Markdown,
@@ -36,6 +38,7 @@ import {
   ScrollView,
   SelectList,
   setKeybindings,
+  Spacer,
   Text,
   TuiMainScreen,
   TUI_KEYBINDINGS,
@@ -50,6 +53,12 @@ const STATE_DIR = path.join(home, 'dsh-pi-tui')
 const ANCHOR = createRequire(import.meta.url).resolve('@deepseek-ai/dsh/package.json')
 const PROFILE_ROOT_CONFIG = '# dsh profile root — empty entry list; tree composed as patches.\n[]\n'
 const plain = (s) => s
+// pi-tui Image: cap the rendered width at ~60 cells (the component parses
+// dimensions from the image headers and derives rows from cell aspect ratio)
+const IMAGE_MAX_WIDTH_CELLS = 60
+// Image theme: pi-tui's built-in text fallback on terminals without
+// Kitty/iTerm2 graphics support — dim gray like the status/dim accents
+const IMAGE_THEME = { fallbackColor: (s) => `\x1b[90m${s}\x1b[0m` }
 
 const LOGO = [
   '  ██████╗ ███████╗██╗  ██╗    ██████╗ ██╗',
@@ -225,6 +234,38 @@ function saveSessionId(id) {
   try { fs.writeFileSync(sessionStatePath(), id) } catch { /* best effort */ }
 }
 
+// ---- content blocks ---------------------------------------------------------
+
+// Walk nested content (tool-result blocks nest their payload) and collect every
+// renderable image block in order: dsh durable attachment refs, pi-style inline
+// base64 blocks, or data: URIs.
+function collectImageBlocks(content, out = []) {
+  for (const b of content || []) {
+    if (!b || typeof b !== 'object') continue
+    if (
+      b.type === 'image' &&
+      (b.attachment || (b.data && b.mimeType) || (typeof b.url === 'string' && b.url.startsWith('data:')))
+    ) out.push(b)
+    else if (b.type === 'tool-result' && Array.isArray(b.content)) collectImageBlocks(b.content, out)
+  }
+  return out
+}
+
+// Join every text block (nested included) — the text counterpart of the image
+// walk. Used for tool-result summaries and conversation-history text.
+function contentText(content) {
+  let s = ''
+  const walk = (blocks) => {
+    for (const b of blocks || []) {
+      if (!b || typeof b !== 'object') continue
+      if (b.type === 'text' && b.text) s += b.text
+      else if (b.type === 'tool-result' && Array.isArray(b.content)) walk(b.content)
+    }
+  }
+  walk(content)
+  return s
+}
+
 // ---- UI ------------------------------------------------------------------------
 
 function setupUi(runtimeRef, modelInfo) {
@@ -239,6 +280,9 @@ function setupUi(runtimeRef, modelInfo) {
   let asstText = ''
   let inText = false
   const queue = []
+  // attachment ids already shown — the same image can arrive twice (streamed
+  // chunk block-end + assembled assistant/message, or tool result + history)
+  const renderedImages = new Set()
 
   const container = new VStack([])
   const scroll = new ScrollView(container, { follow: 'end', primary: true })
@@ -341,6 +385,58 @@ function setupUi(runtimeRef, modelInfo) {
     container.addChild(comp)
     tui.requestRender()
   }
+
+  function addImageMessage(base64, mimeType, opts = {}) {
+    const comp = new Image(base64, mimeType, IMAGE_THEME, {
+      maxWidthCells: IMAGE_MAX_WIDTH_CELLS,
+      filename: opts.name,
+    })
+    messages.push({ kind: 'image', base64, mimeType, name: opts.name, fromTool: !!opts.fromTool, comp })
+    if (opts.fromTool && !showTools) return // folded with tool details — mounted by rebuild() on unfold
+    container.addChild(new Spacer(1))
+    container.addChild(comp)
+    tui.requestRender()
+  }
+
+  // Resolve one image block and mount it: durable attachment ref (dsh), inline
+  // base64 (pi-style blocks), or a data: URI. http(s) URLs are not fetched from
+  // the TUI — the terminal shows where the image lives instead. Deduped by a
+  // stable key so the same image renders exactly once.
+  function addImageFromBlock(block, fromTool) {
+    const ref = block.attachment
+    let base64 = null
+    let mimeType = null
+    let dedupeKey = null
+    const name = block.name || ref?.name
+    if (ref?.attachmentId) dedupeKey = ref.attachmentId
+    else if (block.data && block.mimeType) {
+      base64 = block.data; mimeType = block.mimeType
+      dedupeKey = `${block.mimeType}:${base64.slice(0, 40)}`
+    } else if (typeof block.url === 'string' && block.url.startsWith('data:')) {
+      const m = block.url.match(/^data:([^;,]+);base64,(.+)$/s)
+      if (m) { base64 = m[2]; mimeType = m[1]; dedupeKey = `${m[1]}:${base64.slice(0, 40)}` }
+    }
+    if (!dedupeKey) {
+      if (typeof block.url === 'string') addMessage('sys', `[image: ${block.url}]`)
+      return
+    }
+    if (renderedImages.has(dedupeKey)) return
+    renderedImages.add(dedupeKey)
+    if (base64) { addImageMessage(base64, mimeType, { name, fromTool }); return }
+    if (!runtimeRef.readImage) return
+    runtimeRef.readImage(ref)
+      .then((stored) => {
+        addImageMessage(Buffer.from(stored.data).toString('base64'), stored.ref?.mediaType || ref.mediaType, {
+          name: stored.ref?.name || name,
+          fromTool,
+        })
+      })
+      .catch((e) => {
+        renderedImages.delete(dedupeKey)
+        addMessage('sys', 'image unavailable: ' + e.message)
+      })
+  }
+
   function rebuild() {
     container.clear()
     for (const m of messages) {
@@ -350,6 +446,11 @@ function setupUi(runtimeRef, modelInfo) {
       else if (m.kind === 'tool') m.comp = new Text(showTools ? t.tool(m.text) : t.tool(m.text.split('\n')[0]))
       else if (m.kind === 'result') m.comp = new Text(showTools ? t.result(m.text) : t.sys('…'))
       else if (m.kind === 'logo') m.comp = new Text(t.logo(m.text))
+      else if (m.kind === 'image') {
+        if (m.fromTool && !showTools) continue // folded with tool details
+        container.addChild(new Spacer(1))
+        m.comp = new Image(m.base64, m.mimeType, IMAGE_THEME, { maxWidthCells: IMAGE_MAX_WIDTH_CELLS, filename: m.name })
+      }
       else m.comp = new Text(t.sys(m.text))
       container.addChild(m.comp)
     }
@@ -408,7 +509,14 @@ function setupUi(runtimeRef, modelInfo) {
       else if (chunk.type === 'text-delta' && inText) {
         asstText += chunk.text
         scheduleAsst()
-      } else if (chunk.type === 'block-end') inText = false
+      } else if (chunk.type === 'block-end') {
+        // image output streams as one assembled block — mount it immediately
+        if (chunk.block?.type === 'image') addImageFromBlock(chunk.block, false)
+        inText = false
+      }
+    } else if (event.type === 'assistant/message') {
+      // assembled step message may carry image blocks (deduped against block-end)
+      for (const b of collectImageBlocks(d.message?.content || [])) addImageFromBlock(b, false)
     } else if (event.type === 'tool/call') {
       // surface the running tool in the spinner line (animation keeps going)
       if (busy) {
@@ -419,9 +527,11 @@ function setupUi(runtimeRef, modelInfo) {
       try { a = JSON.stringify(JSON.parse(a)).slice(0, 140) } catch { a = String(a).slice(0, 140) }
       addMessage('tool', `${d.name}\n  ${a}\n`)
     } else if (event.type === 'tool/result') {
-      const parts = d.message?.content || []
-      const txt = parts.find((p) => p.type === 'text' && p.text)?.text || ''
-      if (txt) addMessage('result', txt.split('\n')[0].slice(0, 140))
+      // tool results nest their payload inside a tool-result block — walk it
+      const content = d.message?.content || []
+      const txt = contentText(content).split('\n')[0].slice(0, 140)
+      if (txt) addMessage('result', txt)
+      for (const b of collectImageBlocks(content)) addImageFromBlock(b, true)
     }
   }
 
@@ -443,7 +553,7 @@ keys:
   ↑/↓     browse input history`
 
   function clearView() {
-    cancelAsst(); messages.length = 0; currentAsst = null; asstText = ''; rebuild()
+    cancelAsst(); renderedImages.clear(); messages.length = 0; currentAsst = null; asstText = ''; rebuild()
   }
   function cycleTheme() {
     const names = Object.keys(THEMES)
@@ -509,10 +619,14 @@ keys:
               const r = await runtimeRef.switchSession(pick.id)
               if (r.already) { addMessage('sys', 'already on this session'); setStatus('ready'); return }
               cancelAsst()
+              renderedImages.clear()
               messages.length = 0
               currentAsst = null
               asstText = ''
-              for (const m of runtimeRef.conversationHistory(r.agent)) addMessage(m.kind, m.text)
+              for (const m of await runtimeRef.conversationHistory(r.agent)) {
+                if (m.kind === 'image') addImageMessage(m.base64, m.mimeType, { name: m.name, fromTool: m.fromTool })
+                else addMessage(m.kind, m.text)
+              }
               addMessage('sys', 'switched to: ' + pick.title)
               setStatus('ready')
             } catch (e) {
@@ -551,7 +665,7 @@ keys:
         return true
       }
       case '/new':
-        cancelAsst(); runtimeRef.newSession?.(); addMessage('sys', 'new session'); return true
+        cancelAsst(); renderedImages.clear(); runtimeRef.newSession?.(); addMessage('sys', 'new session'); return true
       case '/quit':
       case 'exit':
         shutdown(); return true
@@ -672,6 +786,11 @@ async function main() {
       prompt(text) {
         agent.followup(createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }))
       },
+      async readImage(ref) {
+        const store = ctx.attachments
+        if (!store?.readImage) throw new Error('attachment store unavailable')
+        return store.readImage(ref)
+      },
       newSession() {
         createAgent().then((c) => {
           agent = c.agent
@@ -745,15 +864,34 @@ async function main() {
         runtimeRef.refreshStatus?.()
         return { agent }
       },
-      conversationHistory(agentObj) {
+      async conversationHistory(agentObj) {
         const msgs = []
+        const imageOf = async (b, fromTool) => {
+          if (b.data && b.mimeType) return { kind: 'image', base64: b.data, mimeType: b.mimeType, name: b.name, fromTool }
+          if (typeof b.url === 'string' && b.url.startsWith('data:')) {
+            const m = b.url.match(/^data:([^;,]+);base64,(.+)$/s)
+            if (m) return { kind: 'image', base64: m[2], mimeType: m[1], name: b.name, fromTool }
+          }
+          const stored = await ctx.attachments.readImage(b.attachment)
+          return {
+            kind: 'image',
+            base64: Buffer.from(stored.data).toString('base64'),
+            mimeType: stored.ref?.mediaType || b.attachment.mediaType,
+            name: stored.ref?.name || b.attachment.name,
+            fromTool,
+          }
+        }
         for (const e of agentObj.session.events) {
           if (e.type === 'user/message') {
-            const txt = (e.data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('')
+            const txt = contentText(e.data.content)
             if (txt) msgs.push({ kind: 'user', text: txt })
           } else if (e.type === 'assistant/message') {
-            const txt = (e.data.message?.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('')
+            const content = e.data.message?.content || []
+            const txt = contentText(content)
             if (txt) msgs.push({ kind: 'asst', text: txt })
+            for (const b of collectImageBlocks(content)) msgs.push(await imageOf(b, false))
+          } else if (e.type === 'tool/result') {
+            for (const b of collectImageBlocks(e.data.message?.content || [])) msgs.push(await imageOf(b, true))
           }
         }
         return msgs
@@ -765,7 +903,7 @@ async function main() {
   }
 
   // UI first: instant; boot the runtime in the background
-  const runtimeRef = { ready: false, sessionId: null, prompt: null, newSession: null, listSessions: null, switchSession: null, conversationHistory: null, dispose: null, onEvent: null, refreshStatus: null }
+  const runtimeRef = { ready: false, sessionId: null, prompt: null, newSession: null, listSessions: null, switchSession: null, conversationHistory: null, readImage: null, dispose: null, onEvent: null, refreshStatus: null }
   const ui = setupUi(runtimeRef, { provider, model })
   runtimeRef.refreshStatus = () => ui.refreshStatus()
   ui.setStarting()
@@ -778,6 +916,7 @@ async function main() {
       runtimeRef.listSessions = runtime.listSessions
       runtimeRef.switchSession = runtime.switchSession
       runtimeRef.conversationHistory = runtime.conversationHistory
+      runtimeRef.readImage = runtime.readImage
       runtimeRef.dispose = runtime.dispose
       runtimeRef.sessionId = runtime.sessionId
       runtime.onEvent((session, event) => ui.renderEvent(session, event))
@@ -791,7 +930,12 @@ async function main() {
   })()
 }
 
-main().catch((e) => {
-  console.error('[dsh-pi-tui] startup failed:', e.message)
-  process.exit(1)
-})
+if (process.env.DSH_PI_TUI_TEST !== '1') {
+  main().catch((e) => {
+    console.error('[dsh-pi-tui] startup failed:', e.message)
+    process.exit(1)
+  })
+}
+
+// pure content-block helpers, exported for tests (DSH_PI_TUI_TEST=1 skips main)
+export { collectImageBlocks, contentText }

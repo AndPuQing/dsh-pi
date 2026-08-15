@@ -23,6 +23,18 @@ Shortcuts (registered via pi-tui `KeybindingsManager`, ids mirror pi's `app.*` d
 | `Ctrl+L` | clear (legacy alias) |
 | `↑` / `↓` | browse input history (per-session, in-memory) |
 
+## Images
+
+When a tool result or the model output carries image blocks (durable dsh
+attachment refs, pi-style inline base64, or `data:` URIs), the TUI renders them
+inline with pi-tui's `Image` component using the Kitty graphics protocol (Kitty,
+Ghostty, WezTerm) or iTerm2 inline images. On terminals without either protocol
+it falls back to a text placeholder (`[Image: …]`). http(s) image URLs are not
+fetched from the TUI — they show as `[image: <url>]`.
+
+Images from tool results fold with `/tools off`; image rendering survives
+`/clear` and session switches (images are rebuilt from the session log).
+
 ## Env
 
 - `DSH_PI_PROVIDER` / `DSH_PI_MODEL` — override the model route (default: `agent-default-model` from `$DSH_HOME/settings.yaml`, else `opencode-go` / `deepseek-v4-flash`)
