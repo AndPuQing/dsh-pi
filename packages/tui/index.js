@@ -7,6 +7,7 @@
 // create an Agent directly, and render its session events live.
 //
 // Commands: /help /clear /theme <name> /tools [on|off] /new /quit
+// Shortcuts: Ctrl+N new session · Ctrl+T theme · Ctrl+K clear · Ctrl+Q quit
 // Env: DSH_BIN unused here; DSH_PI_PROVIDER/DSH_PI_MODEL override the route.
 import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
@@ -27,13 +28,17 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import {
   CombinedAutocompleteProvider,
   Editor,
+  getKeybindings,
+  KeybindingsManager,
   Loader,
   Markdown,
   ProcessTerminal,
   ScrollView,
   SelectList,
+  setKeybindings,
   Text,
   TuiMainScreen,
+  TUI_KEYBINDINGS,
   VStack,
 } from '@earendil-works/pi-tui'
 
@@ -260,6 +265,20 @@ function setupUi(runtimeRef) {
   )
   editor.setAutocompleteProvider(autocomplete)
 
+  // ---- app-level shortcuts via pi-tui's KeybindingsManager -------------------
+  // ids follow pi's `app.*` convention; Ctrl+K deliberately shadows the
+  // editor's `tui.editor.deleteToLineEnd` (pi default) — clear beats kill-line
+  // here. Ctrl+L stays as the legacy clear alias.
+  setKeybindings(
+    new KeybindingsManager({
+      ...TUI_KEYBINDINGS,
+      'app.session.new': { defaultKeys: 'ctrl+n', description: 'Start a fresh session' },
+      'app.theme.next': { defaultKeys: 'ctrl+t', description: 'Switch theme' },
+      'app.clear': { defaultKeys: ['ctrl+k', 'ctrl+l'], description: 'Clear the conversation view' },
+      'app.quit': { defaultKeys: 'ctrl+q', description: 'Quit' },
+    }),
+  )
+
   let busy = false
   function setStatus(str) {
     // idle/static status: hide the spinner, show plain text
@@ -355,14 +374,30 @@ function setupUi(runtimeRef) {
   /theme <name>  switch theme: ${Object.keys(THEMES).join(', ')}
   /tools [on|off]  fold/unfold tool-call details
   /new           start a fresh session
-  /quit, exit    leave`
+  /quit, exit    leave
+
+keys:
+  Ctrl+N  new session
+  Ctrl+T  switch theme (cycles: ${Object.keys(THEMES).join(' -> ')})
+  Ctrl+K  clear the conversation view
+  Ctrl+Q  quit
+  Ctrl+L  clear (alias of Ctrl+K)
+  Ctrl+C  copy selection / cancel`
+
+  function clearView() {
+    messages.length = 0; currentAsst = null; asstText = ''; rebuild()
+  }
+  function cycleTheme() {
+    const names = Object.keys(THEMES)
+    const next = names[(names.indexOf(theme.name) + 1) % names.length]
+    runCommand('/theme ' + next)
+  }
 
   function runCommand(text) {
     const [cmd, arg] = text.split(/\s+/, 2)
     switch (cmd) {
       case '/help': addMessage('sys', HELP); return true
-      case '/clear':
-        messages.length = 0; currentAsst = null; asstText = ''; rebuild(); return true
+      case '/clear': clearView(); return true
       case '/theme': {
         const t = THEMES[arg]
         if (!t) addMessage('sys', `unknown theme '${arg}' — ${Object.keys(THEMES).join(', ')}`)
@@ -458,10 +493,14 @@ function setupUi(runtimeRef) {
     tui.requestRender()
   }
 
+  // app-level shortcuts: listeners run before the focused editor, so a match
+  // consumes the key (e.g. Ctrl+K clears instead of kill-to-line-end).
   tui.addInputListener((data) => {
-    if (data === '\x0c') {
-      messages.length = 0; currentAsst = null; asstText = ''; rebuild()
-    }
+    const kb = getKeybindings()
+    if (kb.matches(data, 'app.session.new')) { runCommand('/new'); return { consume: true } }
+    if (kb.matches(data, 'app.theme.next')) { cycleTheme(); return { consume: true } }
+    if (kb.matches(data, 'app.clear')) { clearView(); return { consume: true } }
+    if (kb.matches(data, 'app.quit')) { shutdown(); return { consume: true } }
   })
 
   let shutting = false

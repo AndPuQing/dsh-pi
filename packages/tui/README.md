@@ -12,6 +12,16 @@ First run auto-creates the `pi-sdk` profile (`$DSH_HOME/profiles/pi-sdk`: base +
 
 Controls: type a prompt and Enter; `exit` / `/quit` / Ctrl-C to leave. Each run uses a fresh session (interrupted runs can leave a wedged resume state — session continuity is a v2 item).
 
+Shortcuts (registered via pi-tui `KeybindingsManager`, ids mirror pi's `app.*` defaults):
+
+| Key | Action |
+|-----|--------|
+| `Ctrl+N` | new session |
+| `Ctrl+T` | switch theme (cycles) |
+| `Ctrl+K` | clear the conversation view (shadows the editor's kill-to-line-end) |
+| `Ctrl+Q` | quit |
+| `Ctrl+L` | clear (legacy alias) |
+
 ## Env
 
 - `DSH_PI_PROVIDER` / `DSH_PI_MODEL` — override the model route (default: `agent-default-model` from `$DSH_HOME/settings.yaml`, else `opencode-go` / `deepseek-v4-flash`)
