@@ -27,6 +27,7 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import {
   CombinedAutocompleteProvider,
   Editor,
+  Loader,
   Markdown,
   ProcessTerminal,
   ScrollView,
@@ -233,8 +234,14 @@ function setupUi(runtimeRef) {
   const container = new VStack([])
   const scroll = new ScrollView(container, { follow: 'end', primary: true })
   const editor = new Editor(tui, theme.editor)
-  const statusText = new Text(theme.status('starting…'))
-  tui.addChild(new VStack([scroll, editor, statusText]))
+  // pi-tui Loader: spins while a turn is in flight, static text when idle
+  const statusLoader = new Loader(
+    tui,
+    (s) => `\x1b[36m${s}\x1b[0m`, // spinner in accent (matches logo/user accents)
+    theme.status, // message in the dim status gray
+    'starting…',
+  )
+  tui.addChild(new VStack([scroll, editor, statusLoader]))
   tui.start()
   tui.setFocus(editor)
 
@@ -253,8 +260,19 @@ function setupUi(runtimeRef) {
   )
   editor.setAutocompleteProvider(autocomplete)
 
+  let busy = false
   function setStatus(str) {
-    statusText.setText(theme.status(str))
+    // idle/static status: hide the spinner, show plain text
+    busy = false
+    statusLoader.setIndicator({ frames: [] })
+    statusLoader.setMessage(str)
+    tui.requestRender()
+  }
+  function setBusy(str) {
+    // turn in flight: pi-tui spinner + message
+    busy = true
+    statusLoader.setIndicator()
+    statusLoader.setMessage(str)
     tui.requestRender()
   }
 
@@ -306,7 +324,7 @@ function setupUi(runtimeRef) {
   // live session-event stream from the in-process runtime
   function renderEvent(session, event) {
     const d = event.data || {}
-    if (event.type === 'turn/start') setStatus('● busy…')
+    if (event.type === 'turn/start') setBusy('busy…')
     if (event.type === 'turn/end') setStatus('ready')
     if (event.type === 'assistant/chunk') {
       const chunk = d.chunk || {}
@@ -316,6 +334,11 @@ function setupUi(runtimeRef) {
         upsertAsst()
       } else if (chunk.type === 'block-end') inText = false
     } else if (event.type === 'tool/call') {
+      // surface the running tool in the spinner line (animation keeps going)
+      if (busy) {
+        statusLoader.setMessage(`⚙ ${d.name}…`)
+        tui.requestRender()
+      }
       let a = d.arguments || ''
       try { a = JSON.stringify(JSON.parse(a)).slice(0, 140) } catch { a = String(a).slice(0, 140) }
       addMessage('tool', `${d.name}\n  ${a}\n`)
