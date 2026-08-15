@@ -17,7 +17,7 @@ Shortcuts (registered via pi-tui `KeybindingsManager`, ids mirror pi's `app.*` d
 | Key | Action |
 |-----|--------|
 | `Ctrl+N` | new session |
-| `Ctrl+T` | switch theme (cycles) |
+| `Ctrl+T` | switch theme (cycles); `/theme` picks from a list |
 | `Ctrl+K` | clear the conversation view (shadows the editor's kill-to-line-end) |
 | `Ctrl+Q` | quit |
 | `Ctrl+L` | clear (legacy alias) |

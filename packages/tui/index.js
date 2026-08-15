@@ -6,7 +6,7 @@
 // compose the pi-embed profile (base + prompt + fff + tools) in-process,
 // create an Agent directly, and render its session events live.
 //
-// Commands: /help /clear /theme <name> /tools [on|off] /new /quit
+// Commands: /help /clear /theme (picker) /tools [on|off] /new /quit
 // Shortcuts: Ctrl+N new session · Ctrl+T theme · Ctrl+K clear · Ctrl+Q quit
 // Env: DSH_BIN unused here; DSH_PI_PROVIDER/DSH_PI_MODEL override the route.
 import { spawnSync } from 'node:child_process'
@@ -84,6 +84,7 @@ function createHighlightCode(codeBlock) {
 const THEMES = {
   default: {
     name: 'default',
+    description: 'dark · cyan accents',
     markdown: {
       heading: (s) => `\x1b[1m${s}\x1b[0m`,
       link: plain,
@@ -117,6 +118,7 @@ const THEMES = {
   },
   light: {
     name: 'light',
+    description: 'light · blue accents',
     markdown: {
       heading: (s) => `\x1b[1m${s}\x1b[0m`,
       link: plain,
@@ -257,7 +259,7 @@ function setupUi(runtimeRef, modelInfo) {
     [
       { name: 'help', description: 'show help' },
       { name: 'clear', description: 'clear the conversation view' },
-      { name: 'theme', description: 'switch theme', argumentHint: '<name>', getArgumentCompletions: () => Object.keys(THEMES).map((n) => ({ value: n, label: n })) },
+      { name: 'theme', description: 'switch theme (picker)', argumentHint: '<name>', getArgumentCompletions: () => Object.keys(THEMES).map((n) => ({ value: n, label: n })) },
       { name: 'tools', description: 'fold/unfold tool details', argumentHint: '[on|off]' },
       { name: 'sessions', description: 'list or switch sessions', argumentHint: '<n>' },
       { name: 'new', description: 'start a fresh session' },
@@ -426,14 +428,14 @@ function setupUi(runtimeRef, modelInfo) {
   const HELP = `commands:
   /help          this help
   /clear         clear the conversation view (session stays)
-  /theme <name>  switch theme: ${Object.keys(THEMES).join(', ')}
+  /theme         pick a theme (default, light) from a list
   /tools [on|off]  fold/unfold tool-call details
   /new           start a fresh session
   /quit, exit    leave
 
 keys:
   Ctrl+N  new session
-  Ctrl+T  switch theme (cycles: ${Object.keys(THEMES).join(' -> ')})
+  Ctrl+T  switch theme (cycles: ${Object.keys(THEMES).join(' -> ')}); /theme picks from a list
   Ctrl+K  clear the conversation view
   Ctrl+Q  quit
   Ctrl+L  clear (alias of Ctrl+K)
@@ -456,8 +458,38 @@ keys:
       case '/clear': clearView(); return true
       case '/theme': {
         const t = THEMES[arg]
-        if (!t) addMessage('sys', `unknown theme '${arg}' — ${Object.keys(THEMES).join(', ')}`)
-        else { theme = t; rebuild(); addMessage('sys', `theme: ${t.name}`) }
+        if (t) { theme = t; rebuild(); addMessage('sys', `theme: ${t.name}`) }
+        else if (arg) addMessage('sys', `unknown theme '${arg}' — ${Object.keys(THEMES).join(', ')}`)
+        else {
+          // interactive picker, same pattern as /sessions
+          const dim = (s) => `\x1b[90m${s}\x1b[0m`
+          const sel = new SelectList(
+            Object.entries(THEMES).map(([name, th]) => ({
+              label: name + (name === theme.name ? ' (current)' : ''),
+              value: name,
+              description: th.description || '',
+            })),
+            10,
+            {
+              selectedPrefix: (s) => `\x1b[36m❯ ${s}\x1b[0m`,
+              selectedText: (s) => `\x1b[1m${s}\x1b[0m`,
+              description: dim,
+              scrollInfo: dim,
+              noMatch: dim,
+            },
+          )
+          sel.onSelect = (item) => {
+            tui.hideOverlay()
+            tui.setFocus(editor)
+            submit('/theme ' + item.value)
+          }
+          sel.onCancel = () => {
+            tui.hideOverlay()
+            tui.setFocus(editor)
+          }
+          tui.showOverlay(sel)
+          tui.setFocus(sel)
+        }
         return true
       }
       case '/tools':
