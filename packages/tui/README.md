@@ -35,6 +35,13 @@ fetched from the TUI — they show as `[image: <url>]`.
 Images from tool results fold with `/tools off`; image rendering survives
 `/clear` and session switches (images are rebuilt from the session log).
 
+## Errors & help
+
+Tool failures and model/provider errors render as red `✗` blocks (with a dim
+failure-code detail line), instead of being swallowed or shown as plain text;
+successful tool results keep the green `✓` line. `/help` prints a structured,
+aligned command/key reference.
+
 ## Env
 
 - `DSH_PI_PROVIDER` / `DSH_PI_MODEL` — override the model route (default: `agent-default-model` from `$DSH_HOME/settings.yaml`, else `opencode-go` / `deepseek-v4-flash`)

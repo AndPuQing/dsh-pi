@@ -121,6 +121,13 @@ const THEMES = {
     user: (s) => `\x1b[94m❯\x1b[0m ${s}`,
     tool: (s) => `\x1b[36m⚙ ${s}\x1b[0m`,
     result: (s) => `\x1b[32m✓\x1b[0m ${s}`,
+    error: (s) => `\x1b[31m✗ ${s}\x1b[0m`,
+    help: {
+      header: (s) => `\x1b[1m\x1b[90m${s}\x1b[0m`,
+      cmd: (s) => `\x1b[36m${s}\x1b[0m`,
+      key: (s) => `\x1b[36m${s}\x1b[0m`,
+      desc: plain,
+    },
     sys: (s) => `\x1b[33m${s}\x1b[0m`,
     status: (s) => `\x1b[90m${s}\x1b[0m`,
     logo: (s) => `\x1b[36m${s}\x1b[0m`,
@@ -155,6 +162,13 @@ const THEMES = {
     user: (s) => `\x1b[34m❯\x1b[0m ${s}`,
     tool: (s) => `\x1b[34m⚙ ${s}\x1b[0m`,
     result: (s) => `\x1b[32m✓\x1b[0m ${s}`,
+    error: (s) => `\x1b[31m✗ ${s}\x1b[0m`,
+    help: {
+      header: (s) => `\x1b[1m\x1b[90m${s}\x1b[0m`,
+      cmd: (s) => `\x1b[34m${s}\x1b[0m`,
+      key: (s) => `\x1b[34m${s}\x1b[0m`,
+      desc: plain,
+    },
     sys: (s) => `\x1b[33m${s}\x1b[0m`,
     status: (s) => `\x1b[90m${s}\x1b[0m`,
     logo: (s) => `\x1b[36m${s}\x1b[0m`,
@@ -276,6 +290,7 @@ function setupUi(runtimeRef, modelInfo) {
   const runtimeInfo = { provider: modelInfo?.provider || '', model: modelInfo?.model || '' }
   let showTools = true
   const messages = []
+  const toolNames = new Map() // callId -> tool name, for correlating error results
   let currentAsst = null
   let asstText = ''
   let inText = false
@@ -377,9 +392,13 @@ function setupUi(runtimeRef, modelInfo) {
                 ? t.tool(text)
                 : kind === 'result'
                   ? t.result(text)
-                  : kind === 'logo'
-                    ? t.logo(text)
-                    : t.sys(text),
+                  : kind === 'error'
+                    ? t.error(text)
+                    : kind === 'help'
+                      ? text // already styled by the help builder
+                      : kind === 'logo'
+                        ? t.logo(text)
+                        : t.sys(text),
           )
     messages.push({ kind, text, comp })
     container.addChild(comp)
@@ -445,6 +464,8 @@ function setupUi(runtimeRef, modelInfo) {
       else if (m.kind === 'user') m.comp = new Text(t.user(m.text))
       else if (m.kind === 'tool') m.comp = new Text(showTools ? t.tool(m.text) : t.tool(m.text.split('\n')[0]))
       else if (m.kind === 'result') m.comp = new Text(showTools ? t.result(m.text) : t.sys('…'))
+      else if (m.kind === 'error') m.comp = new Text(t.error(m.text))
+      else if (m.kind === 'help') m.comp = new Text(m.text)
       else if (m.kind === 'logo') m.comp = new Text(t.logo(m.text))
       else if (m.kind === 'image') {
         if (m.fromTool && !showTools) continue // folded with tool details
@@ -501,7 +522,26 @@ function setupUi(runtimeRef, modelInfo) {
     if (event.type === 'turn/start') setBusy('busy…')
     if (event.type === 'turn/end') {
       flushAsst()
-      setStatus('ready')
+      const reason = d.reason || {}
+      if (reason.kind === 'error' && reason.error) {
+        // model/provider failure: structured LlmFailure facts, rendered as an error block
+        const f = reason.error
+        const detail = [
+          f.code,
+          f.status ? `status ${f.status}` : '',
+          f.requestId ? `request ${f.requestId}` : '',
+        ].filter(Boolean).join(' · ')
+        addMessage('error', `model: ${f.message}${detail ? `\n  \x1b[90m${detail}\x1b[0m` : ''}`)
+        setStatus('error')
+      } else if (reason.kind === 'max-tokens') {
+        addMessage('sys', '⏹ output token limit reached')
+        setStatus('ready')
+      } else if (reason.kind === 'interrupted') {
+        addMessage('sys', '⏹ turn interrupted (session restored)')
+        setStatus('ready')
+      } else {
+        setStatus('ready')
+      }
     }
     if (event.type === 'assistant/chunk') {
       const chunk = d.chunk || {}
@@ -523,34 +563,55 @@ function setupUi(runtimeRef, modelInfo) {
         statusLoader.setMessage(composeStatus(`⚙ ${d.name}…`))
         tui.requestRender()
       }
+      toolNames.set(d.callId, d.name)
       let a = d.arguments || ''
       try { a = JSON.stringify(JSON.parse(a)).slice(0, 140) } catch { a = String(a).slice(0, 140) }
       addMessage('tool', `${d.name}\n  ${a}\n`)
     } else if (event.type === 'tool/result') {
       // tool results nest their payload inside a tool-result block — walk it
       const content = d.message?.content || []
-      const txt = contentText(content).split('\n')[0].slice(0, 140)
-      if (txt) addMessage('result', txt)
+      const txt = contentText(content)
+      const first = content[0]
+      const failed = !!(d.error || first?.isError)
+      if (failed) {
+        const name = toolNames.get(d.callId) || 'tool'
+        const head = (txt.split('\n')[0].trim() || 'no message').slice(0, 140)
+        const code = d.error ? `${d.error.name}${d.error.code ? ` (${d.error.code})` : ''}` : ''
+        addMessage('error', `${name}: ${head}${code ? `\n  \x1b[90m${code}\x1b[0m` : ''}`)
+      } else if (txt) {
+        addMessage('result', txt.split('\n')[0].slice(0, 140))
+      }
       for (const b of collectImageBlocks(content)) addImageFromBlock(b, true)
     }
   }
 
-  const HELP = `commands:
-  /help          this help
-  /clear         clear the conversation view (session stays)
-  /theme         pick a theme (default, light) from a list
-  /tools [on|off]  fold/unfold tool-call details
-  /new           start a fresh session
-  /quit, exit    leave
-
-keys:
-  Ctrl+N  new session
-  Ctrl+T  switch theme (cycles: ${Object.keys(THEMES).join(' -> ')}); /theme picks from a list
-  Ctrl+K  clear the conversation view
-  Ctrl+Q  quit
-  Ctrl+L  clear (alias of Ctrl+K)
-  Ctrl+C  copy selection / cancel
-  ↑/↓     browse input history`
+  // structured /help: section headers + aligned command/key rows (theme-aware)
+  const pad = (s, n) => (s.length < n ? s + ' '.repeat(n - s.length) : s)
+  function buildHelp() {
+    const t = theme.help
+    const themeNames = Object.keys(THEMES)
+    const cmdRow = (cmd, desc) => `  ${t.cmd(pad(cmd, 20))} ${t.desc(desc)}`
+    const keyRow = (key, desc) => `  ${t.key(pad(key, 12))} ${t.desc(desc)}`
+    return [
+      t.header('commands'),
+      cmdRow('/help', 'this help'),
+      cmdRow('/clear', 'clear the conversation view (session stays)'),
+      cmdRow('/theme [name]', `switch theme from a list (${themeNames.join(', ')})`),
+      cmdRow('/tools [on|off]', 'fold/unfold tool-call details'),
+      cmdRow('/sessions', 'list or switch sessions'),
+      cmdRow('/new', 'start a fresh session'),
+      cmdRow('/quit, exit', 'leave'),
+      '',
+      t.header('keys'),
+      keyRow('Ctrl+N', 'new session'),
+      keyRow('Ctrl+T', `switch theme (cycles: ${themeNames.join(' -> ')})`),
+      keyRow('Ctrl+K', 'clear the conversation view'),
+      keyRow('Ctrl+Q', 'quit'),
+      keyRow('Ctrl+L', 'clear (alias of Ctrl+K)'),
+      keyRow('Ctrl+C', 'copy selection / cancel'),
+      keyRow('↑ / ↓', 'browse input history'),
+    ].join('\n')
+  }
 
   function clearView() {
     cancelAsst(); renderedImages.clear(); messages.length = 0; currentAsst = null; asstText = ''; rebuild()
@@ -564,7 +625,7 @@ keys:
   function runCommand(text) {
     const [cmd, arg] = text.split(/\s+/, 2)
     switch (cmd) {
-      case '/help': addMessage('sys', HELP); return true
+      case '/help': addMessage('help', buildHelp()); return true
       case '/clear': clearView(); return true
       case '/theme': {
         const t = THEMES[arg]
@@ -630,7 +691,7 @@ keys:
               addMessage('sys', 'switched to: ' + pick.title)
               setStatus('ready')
             } catch (e) {
-              addMessage('sys', 'switch failed: ' + e.message)
+              addMessage('error', `switch: ${e.message}`)
               setStatus('ready')
             }
           })
@@ -687,7 +748,7 @@ keys:
     try {
       runtimeRef.prompt(t)
     } catch (e) {
-      addMessage('sys', '! ' + e.message)
+      addMessage('error', `prompt: ${e.message}`)
     }
   }
 
@@ -734,7 +795,7 @@ keys:
     refreshStatus,
     setModelInfo,
     fail(message) {
-      addMessage('sys', '! startup failed: ' + message)
+      addMessage('error', `startup: ${message}`)
     },
   }
 }
