@@ -23,6 +23,8 @@ Shortcuts (registered via pi-tui `KeybindingsManager`, ids mirror pi's `app.*` d
 | `Ctrl+L` | clear (legacy alias) |
 | `↑` / `↓` | browse input history (per-session, in-memory) |
 
+Display: tool failures and model/provider errors render as red `✗` blocks (with a dim failure-code detail line), instead of being swallowed or shown as plain text; `/help` prints a structured, aligned command/key reference. Successful tool results keep the green `✓` line.
+
 ## Env
 
 - `DSH_PI_PROVIDER` / `DSH_PI_MODEL` — override the model route (default: `agent-default-model` from `$DSH_HOME/settings.yaml`, else `opencode-go` / `deepseek-v4-flash`)
