@@ -8,9 +8,26 @@ Terminal UI for dsh-pi. **v0**: a readline-based interactive shell that drives t
 dsh-pi-tui            # requires dsh on PATH
 ```
 
-First run auto-creates the `pi-sdk` profile (`$DSH_HOME/profiles/pi-sdk`: base + @dsh-pi/prompt + fff + tools + the SDK JSON-RPC server) and installs its dependencies via `npx pnpm`.
+First run auto-creates the `pi-embed` profile (`$DSH_HOME/profiles/pi-embed`: base + @dsh-pi/prompt + fff + tools) and installs its dependencies via `bunx pnpm` / `npx pnpm`.
 
-Controls: type a prompt and Enter; `exit` / `/quit` / Ctrl-C to leave. Each run uses a fresh session (interrupted runs can leave a wedged resume state — session continuity is a v2 item).
+Controls: type a prompt and Enter; `exit` / `/quit` / Ctrl-C to leave.
+
+## Commands
+
+| Command | Action |
+|---------|--------|
+| `/help` | show help |
+| `/clear` | clear the conversation view (session stays) |
+| `/theme <name>` | switch theme (`default`, `light`) |
+| `/tools [on|off]` | fold/unfold tool-call details |
+| `/sessions` | open the session picker (tree view — select to switch, `d`/`x` deletes with confirmation, `Esc` cancels) |
+| `/sessions <n>` | switch to session #n (tree order) |
+| `/sessions delete <n>` | delete session #n (the current session is never deletable) |
+| `/fork` | branch a child session from this one (shown as a tree child in `/sessions`) |
+| `/new` | start a fresh session |
+| `/quit`, `exit` | leave |
+
+Sessions are displayed by their runtime-generated title (deterministic first-prompt fallback, then LLM-refined); forked sessions render indented under their parent so the picker navigates the session tree.
 
 Shortcuts (registered via pi-tui `KeybindingsManager`, ids mirror pi's `app.*` defaults):
 
@@ -50,6 +67,7 @@ aligned command/key reference.
 ## Roadmap
 
 - v2 (done): slash commands, theme switching (default/light), tool-call folding, Ctrl-L clear, session continuity with self-heal
+- v2.1 (done): loader spinner, app shortcuts, input history, session titles / delete / tree navigation
 
 ## License
 

@@ -280,6 +280,71 @@ function contentText(content) {
   return s
 }
 
+// ---- sessions --------------------------------------------------------------------
+
+// dsh's project-key normalization for the on-disk sessions root: separators ->
+// '-', unsafe chars -> ~XXXX, wrapped in --..--. Mirrors the dsh persistence
+// encoding so we can locate/delete session dirs ourselves (the persistence
+// seam deliberately has no deletion API).
+function projectKey(cwd) {
+  let readable = ''
+  let sep = false
+  for (let i = 0; i < cwd.length; i++) {
+    const code = cwd.charCodeAt(i)
+    const ch = cwd[i]
+    if (ch === '/' || ch === '\\' || ch === ':') {
+      if (!sep) readable += '-'
+      sep = true
+    } else if (ch !== '~' && /^[A-Za-z0-9._-]$/.test(ch)) {
+      readable += ch
+      sep = false
+    } else {
+      readable += '~' + code.toString(16).toUpperCase().padStart(4, '0')
+      sep = false
+    }
+  }
+  return `--${(readable.replace(/^-+/, '') || 'root').slice(0, 251)}--`
+}
+
+function shortSessionId(id) {
+  return '#' + String(id).replace(/^session-/, '').slice(0, 8)
+}
+
+// Raw on-disk fallback listing (used only when sessionQuery is unavailable):
+// reads the header line for createdAt/parentSession and the LATEST session/title
+// event (latest wins) per session.
+function scanSessionsOnDisk(currentId) {
+  const root = path.join(home, 'sessions', projectKey(process.cwd()))
+  let dirs = []
+  try { dirs = fs.readdirSync(root, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name) } catch { return [] }
+  const out = []
+  for (const dir of dirs) {
+    const file = path.join(root, dir, 'session.jsonl.zstd')
+    let title = shortSessionId(dir)
+    let createdAt = 0
+    let parent = null
+    try {
+      const raw = zstdDecompressSync(fs.readFileSync(file))
+      const text = raw.toString('utf8')
+      const head = JSON.parse(text.slice(0, text.indexOf('\n')))
+      createdAt = head.createdAt || 0
+      parent = head.parentSession || null
+      for (const line of text.split('\n')) {
+        if (!line.includes('session/title')) continue
+        try {
+          const ev = JSON.parse(line)
+          if (ev.type === 'session/title' && ev.data?.title) title = ev.data.title
+        } catch { /* skip malformed lines */ }
+      }
+    } catch { /* skip unreadable */ }
+    out.push({ id: dir, title, createdAt, parent, current: currentId === dir })
+  }
+  out.sort((a, b) => b.createdAt - a.createdAt)
+  return out
+}
+
+// ---- UI ------------------------------------------------------------------------
+
 // ---- UI ------------------------------------------------------------------------
 
 function setupUi(runtimeRef, modelInfo) {
@@ -320,7 +385,8 @@ function setupUi(runtimeRef, modelInfo) {
       { name: 'clear', description: 'clear the conversation view' },
       { name: 'theme', description: 'switch theme (picker)', argumentHint: '<name>', getArgumentCompletions: () => Object.keys(THEMES).map((n) => ({ value: n, label: n })) },
       { name: 'tools', description: 'fold/unfold tool details', argumentHint: '[on|off]' },
-      { name: 'sessions', description: 'list or switch sessions', argumentHint: '<n>' },
+      { name: 'sessions', description: 'pick, switch or delete sessions', argumentHint: '[<n>|delete <n>]' },
+      { name: 'fork', description: 'branch a child session from this one' },
       { name: 'new', description: 'start a fresh session' },
       { name: 'quit', description: 'leave' },
     ],
@@ -348,8 +414,8 @@ function setupUi(runtimeRef, modelInfo) {
     const parts = []
     if (runtimeInfo.model) parts.push(`${runtimeInfo.provider}/${runtimeInfo.model}`)
     if (runtimeRef.sessionId) {
-      const short = String(runtimeRef.sessionId).replace(/^session-/, '').slice(0, 8)
-      parts.push(`session ${short}`)
+      const title = runtimeRef.currentTitle?.()
+      parts.push(title ? `“${title}”` : `session ${String(runtimeRef.sessionId).replace(/^session-/, '').slice(0, 8)}`)
     }
     parts.push(str)
     return parts.join(' · ')
@@ -598,7 +664,10 @@ function setupUi(runtimeRef, modelInfo) {
       cmdRow('/clear', 'clear the conversation view (session stays)'),
       cmdRow('/theme [name]', `switch theme from a list (${themeNames.join(', ')})`),
       cmdRow('/tools [on|off]', 'fold/unfold tool-call details'),
-      cmdRow('/sessions', 'list or switch sessions'),
+      cmdRow('/sessions', 'pick a session from the tree (d = delete, Esc = cancel)'),
+      cmdRow('/sessions <n>', 'switch to session #n'),
+      cmdRow('/sessions delete <n>', 'delete session #n (never the current one)'),
+      cmdRow('/fork', 'branch a child session from this one'),
       cmdRow('/new', 'start a fresh session'),
       cmdRow('/quit, exit', 'leave'),
       '',
@@ -622,8 +691,148 @@ function setupUi(runtimeRef, modelInfo) {
     runCommand('/theme ' + next)
   }
 
+  // ---- session picker (tree) ----------------------------------------------------
+  let pickerState = null  // { sel, flat } while the /sessions overlay is open
+  let confirmingDelete = false
+
+  // Flatten sessions into a display tree: roots (no parent in the corpus) first,
+  // each followed by its descendants, siblings newest-first. The flat order is
+  // what /sessions <n> and the picker numbering address.
+  function buildSessionTree(list) {
+    const byId = new Map(list.map((x) => [x.id, x]))
+    const childrenOf = new Map()
+    const roots = []
+    for (const x of list) {
+      if (x.parent && byId.has(x.parent)) {
+        if (!childrenOf.has(x.parent)) childrenOf.set(x.parent, [])
+        childrenOf.get(x.parent).push(x)
+      } else roots.push(x)
+    }
+    const sortNewest = (a, b) => b.createdAt - a.createdAt
+    roots.sort(sortNewest)
+    for (const kids of childrenOf.values()) kids.sort(sortNewest)
+    const flat = []
+    const walk = (node, depth) => {
+      flat.push({ node, depth })
+      for (const c of childrenOf.get(node.id) || []) walk(c, depth + 1)
+    }
+    for (const r of roots) walk(r, 0)
+    return flat
+  }
+
+  const dim = (s) => `\x1b[90m${s}\x1b[0m`
+  const pickerTheme = {
+    selectedPrefix: (s) => `\x1b[36m❯ ${s}\x1b[0m`,
+    selectedText: (s) => `\x1b[1m${s}\x1b[0m`,
+    description: dim,
+    scrollInfo: dim,
+    noMatch: dim,
+  }
+
+  function closePicker() {
+    pickerState = null
+    tui.hideOverlay()
+    tui.setFocus(editor)
+  }
+
+  function openSessionPicker() {
+    runtimeRef.listSessions?.().then((list) => {
+      if (!list.length) { addMessage('sys', 'no sessions yet'); return }
+      const flat = buildSessionTree(list)
+      const items = flat.map(({ node, depth }) => {
+        const indent = '  '.repeat(depth)
+        const branch = depth ? '└ ' : ''
+        const label = `${indent}${branch}${node.title}${node.current ? ' (current)' : ''}`
+        const desc = shortSessionId(node.id) + (node.parent ? ' · fork of ' + shortSessionId(node.parent) : '')
+        return { label, value: node.id, description: desc }
+      })
+      const sel = new SelectList(items, 10, pickerTheme)
+      pickerState = { sel, flat }
+      sel.onSelect = (item) => {
+        closePicker()
+        const n = flat.findIndex((f) => f.node.id === item.value) + 1
+        submit('/sessions ' + n)
+      }
+      sel.onCancel = () => closePicker()
+      tui.showOverlay(sel)
+      tui.setFocus(sel)
+    })
+  }
+
+  function confirmDeleteSession(node) {
+    confirmingDelete = true
+    const confirm = new SelectList(
+      [
+        { value: 'no', label: 'cancel' },
+        { value: 'yes', label: `delete “${node.title}” (${shortSessionId(node.id)})` },
+      ],
+      5,
+      pickerTheme,
+    )
+    const done = () => {
+      confirmingDelete = false
+      tui.hideOverlay()  // pop the confirm overlay; focus returns to the picker
+    }
+    confirm.onSelect = async (c) => {
+      if (c.value !== 'yes') { done(); tui.setFocus(pickerState?.sel); return }
+      done()
+      closePicker()
+      setStatus('… deleting…')
+      try {
+        await runtimeRef.deleteSession(node.id)
+        addMessage('sys', 'deleted session: ' + node.title)
+      } catch (e) {
+        addMessage('sys', '! delete failed: ' + e.message)
+      }
+      setStatus('ready')
+    }
+    confirm.onCancel = () => { done(); tui.setFocus(pickerState?.sel) }
+    tui.showOverlay(confirm)
+    tui.setFocus(confirm)
+  }
+
+  function switchToPick(list, n) {
+    const pick = buildSessionTree(list)[n - 1]?.node
+    if (!pick) { addMessage('sys', 'no session #' + n); return }
+    setStatus('… switching to ' + pick.title + '…')
+    runtimeRef.switchSession(pick.id).then(async (r) => {
+      if (r.already) { addMessage('sys', 'already on this session'); setStatus('ready'); return }
+      cancelAsst()
+      renderedImages.clear()
+      messages.length = 0
+      currentAsst = null
+      asstText = ''
+      for (const m of await runtimeRef.conversationHistory(r.agent)) {
+        if (m.kind === 'image') addImageMessage(m.base64, m.mimeType, { name: m.name, fromTool: m.fromTool })
+        else addMessage(m.kind, m.text)
+      }
+      addMessage('sys', 'switched to: ' + pick.title)
+      setStatus('ready')
+    }).catch((e) => {
+      addMessage('error', `switch: ${e.message}`)
+      setStatus('ready')
+    })
+  }
+
+  function deletePick(list, n) {
+    const pick = buildSessionTree(list)[n - 1]?.node
+    if (!pick) { addMessage('sys', 'no session #' + n); return }
+    if (pick.current) { addMessage('sys', "can't delete the current session"); return }
+    setStatus('… deleting…')
+    runtimeRef.deleteSession(pick.id).then(() => {
+      addMessage('sys', 'deleted session: ' + pick.title)
+      setStatus('ready')
+    }).catch((e) => {
+      addMessage('sys', '! delete failed: ' + e.message)
+      setStatus('ready')
+    })
+  }
+
   function runCommand(text) {
-    const [cmd, arg] = text.split(/\s+/, 2)
+    // split on the first space only so multi-word args survive (e.g. 'delete 2')
+    const sp = text.indexOf(' ')
+    const cmd = sp === -1 ? text : text.slice(0, sp)
+    const arg = sp === -1 ? '' : text.slice(sp + 1).trim()
     switch (cmd) {
       case '/help': addMessage('help', buildHelp()); return true
       case '/clear': clearView(); return true
@@ -670,63 +879,46 @@ function setupUi(runtimeRef, modelInfo) {
         rebuild(); addMessage('sys', `tool details: ${showTools ? 'on' : 'off'}`)
         return true
       case '/sessions': {
+        const del = String(arg || '').match(/^delete\s+(\d+)$/i)
         const n = Number(arg)
-        if (n && Number.isInteger(n) && n >= 1) {
-          runtimeRef.listSessions?.().then(async (list) => {
-            const pick = list[n - 1]
-            if (!pick) { addMessage('sys', 'no session #' + n); return }
-            setStatus('… switching to ' + pick.title + '…')
-            try {
-              const r = await runtimeRef.switchSession(pick.id)
-              if (r.already) { addMessage('sys', 'already on this session'); setStatus('ready'); return }
-              cancelAsst()
-              renderedImages.clear()
-              messages.length = 0
-              currentAsst = null
-              asstText = ''
-              for (const m of await runtimeRef.conversationHistory(r.agent)) {
-                if (m.kind === 'image') addImageMessage(m.base64, m.mimeType, { name: m.name, fromTool: m.fromTool })
-                else addMessage(m.kind, m.text)
-              }
-              addMessage('sys', 'switched to: ' + pick.title)
-              setStatus('ready')
-            } catch (e) {
-              addMessage('error', `switch: ${e.message}`)
-              setStatus('ready')
-            }
-          })
+        if (del) {
+          runtimeRef.listSessions?.().then((list) => deletePick(list, Number(del[1])))
+        } else if (n && Number.isInteger(n) && n >= 1) {
+          runtimeRef.listSessions?.().then((list) => switchToPick(list, n))
         } else {
-          runtimeRef.listSessions?.().then((list) => {
-            if (!list.length) { addMessage('sys', 'no sessions yet'); return }
-            const dim = (s) => `\x1b[90m${s}\x1b[0m`
-            const sel = new SelectList(
-              list.map((x) => ({ label: x.title + (x.current ? ' (current)' : ''), value: x.id, description: x.id })),
-              10,
-              {
-                selectedPrefix: (s) => `\x1b[36m❯ ${s}\x1b[0m`,
-                selectedText: (s) => `\x1b[1m${s}\x1b[0m`,
-                description: dim,
-                scrollInfo: dim,
-                noMatch: dim,
-              },
-            )
-            sel.onSelect = (item) => {
-              tui.hideOverlay()
-              tui.setFocus(editor)
-              submit('/sessions ' + (list.findIndex((x) => x.id === item.value) + 1))
-            }
-            sel.onCancel = () => {
-              tui.hideOverlay()
-              tui.setFocus(editor)
-            }
-            tui.showOverlay(sel)
-            tui.setFocus(sel)
-          })
+          openSessionPicker()
         }
         return true
       }
+      case '/fork': {
+        if (busy) { addMessage('sys', 'wait for the current turn to finish before forking'); return true }
+        setStatus('… forking…')
+        runtimeRef.forkSession?.().then(async (r) => {
+          cancelAsst()
+          renderedImages.clear()
+          messages.length = 0
+          currentAsst = null
+          asstText = ''
+          for (const m of await runtimeRef.conversationHistory(r.agent)) {
+            if (m.kind === 'image') addImageMessage(m.base64, m.mimeType, { name: m.name, fromTool: m.fromTool })
+            else addMessage(m.kind, m.text)
+          }
+          addMessage('sys', `forked — child session, shared ${r.seedLength} events`)
+          setStatus('ready')
+        }).catch((e) => {
+          addMessage('error', `fork: ${e.message}`)
+          setStatus('ready')
+        })
+        return true
+      }
       case '/new':
-        cancelAsst(); renderedImages.clear(); runtimeRef.newSession?.(); addMessage('sys', 'new session'); return true
+        cancelAsst(); renderedImages.clear()
+        setStatus('… new session…')
+        runtimeRef.newSession?.().then(() => setStatus('ready')).catch((e) => {
+          addMessage('error', `new session: ${e.message}`)
+          setStatus('ready')
+        })
+        return true
       case '/quit':
       case 'exit':
         shutdown(); return true
@@ -767,6 +959,15 @@ function setupUi(runtimeRef, modelInfo) {
     if (kb.matches(data, 'app.theme.next')) { cycleTheme(); return { consume: true } }
     if (kb.matches(data, 'app.clear')) { clearView(); return { consume: true } }
     if (kb.matches(data, 'app.quit')) { shutdown(); return { consume: true } }
+    // session picker: d/x deletes the selected session (confirmation follows)
+    if (pickerState && !confirmingDelete && (data === 'd' || data === 'x')) {
+      const item = pickerState.sel.getSelectedItem()
+      if (item) {
+        const entry = pickerState.flat.find((f) => f.node.id === item.value)
+        if (entry) confirmDeleteSession(entry.node)
+      }
+      return { consume: true }
+    }
   })
 
   let shutting = false
@@ -794,6 +995,11 @@ function setupUi(runtimeRef, modelInfo) {
     },
     refreshStatus,
     setModelInfo,
+    onSessionSwitched() {
+      // the agent changed — the old turn's busy state is stale; settle on ready
+      cancelAsst()
+      setStatus('ready')
+    },
     fail(message) {
       addMessage('error', `startup: ${message}`)
     },
@@ -813,11 +1019,17 @@ async function main() {
 
     const selection = defaultModel.currentSelection()
     let agent = null
+    // Owned AgentHandle for the live agent. Replacing it disposes the previous
+    // handle — dispose() stops the old loop and removes its session from the
+    // live store (the persisted log stays on disk) — so at most the current
+    // session is ever live and deleting persisted sessions is safe.
+    let handle = null
 
-    function createAgentWithId(sessionId) {
+    function createAgentWithId(sessionId, opts = {}) {
       return agents.create({
         sessionId: SessionId(sessionId),
-        meta: { cwd: process.cwd() },
+        meta: { cwd: process.cwd(), ...(opts.meta || {}) },
+        ...(opts.seed ? { seed: opts.seed } : {}),
         agentOptions: { provider: selection.provider, model: selection.model },
         setup: (agentCtx) => {
           installModelSelection(agentCtx, { current: selection, assembled: void 0 })
@@ -827,8 +1039,19 @@ async function main() {
     function createAgent() {
       return createAgentWithId(`session-${randomUUID()}`)
     }
+    function retireHandle() {
+      const old = handle
+      handle = null
+      if (old) old.dispose().catch(() => { /* best effort */ })
+    }
+    function adoptHandle(h) {
+      retireHandle()
+      handle = h
+      agent = h.agent
+    }
 
     const created = await createAgent()
+    handle = created
     agent = created.agent
     await agent.whenIdle()
 
@@ -852,77 +1075,98 @@ async function main() {
         if (!store?.readImage) throw new Error('attachment store unavailable')
         return store.readImage(ref)
       },
+      currentTitle() {
+        // synchronous fold of the live log's latest session/title event
+        try { return ctx.sessionTitle?.get(agent.session)?.title } catch { return undefined }
+      },
       newSession() {
-        createAgent().then((c) => {
-          agent = c.agent
+        return createAgent().then((c) => {
+          adoptHandle(c)
           return agent.whenIdle()
         }).then(() => {
           runtimeRef.sessionId = agent.session.id
-          runtimeRef.refreshStatus?.()
+          runtimeRef.sessionSwitched?.()
         })
       },
+      async forkSession() {
+        // seed = balanced completed-turn prefix of the current log; the child
+        // keeps parentSession lineage so /sessions renders a real tree
+        const events = agent.session.events
+        let cut = 0
+        for (let i = 0; i < events.length; i++) {
+          if (events[i].type === 'turn/end') cut = i + 1
+        }
+        const seed = events.slice(0, cut)
+        const c = await createAgentWithId(`session-${randomUUID()}`, {
+          meta: { parentSession: agent.session.id, seedLength: seed.length },
+          ...(seed.length ? { seed } : {}),
+        })
+        adoptHandle(c)
+        await agent.whenIdle()
+        runtimeRef.sessionId = agent.session.id
+        runtimeRef.sessionSwitched?.()
+        return { agent, seedLength: seed.length }
+      },
       async listSessions() {
-        // dsh's project-key: separators -> '-', unsafe chars -> ~XXXX, wrapped in --..--
-        const cwd = process.cwd()
-        let readable = ''
-        let sep = false
-        for (let i = 0; i < cwd.length; i++) {
-          const code = cwd.charCodeAt(i)
-          const ch = cwd[i]
-          if (ch === '/' || ch === '\\' || ch === ':') {
-            if (!sep) readable += '-'
-            sep = true
-          } else if (ch !== '~' && /^[A-Za-z0-9._-]$/.test(ch)) {
-            readable += ch
-            sep = false
-          } else {
-            readable += '~' + code.toString(16).toUpperCase().padStart(4, '0')
-            sep = false
+        // sessionQuery corpus is live-preferred and newest-first; filter to the
+        // sessions this TUI created (same cwd) and fold their latest titles.
+        let records = []
+        try { records = await ctx.sessionQuery.listSessions() } catch { /* fall through to the raw scan */ }
+        const mine = records.filter((r) => r.header.cwd === process.cwd())
+        if (!mine.length) return scanSessionsOnDisk(agent?.session?.id)
+        const ids = mine.map((r) => r.header.id)
+        const titleById = new Map()
+        try {
+          const obs = await ctx.sessionQuery.readTitleSnapshots(ids)
+          for (const o of obs) {
+            if (o.status === 'fulfilled' && o.value.title) titleById.set(o.sessionId, o.value.title.title)
           }
+        } catch { /* titles are a nice-to-have */ }
+        return mine.map((r) => ({
+          id: r.header.id,
+          title: titleById.get(r.header.id) || shortSessionId(r.header.id),
+          createdAt: r.header.createdAt,
+          parent: r.header.parentSession || null,
+          current: agent?.session?.id === r.header.id,
+        }))
+      },
+      async deleteSession(sessionId) {
+        if (agent && agent.session.id === sessionId) throw new Error('cannot delete the current session')
+        const records = await ctx.sessionQuery.listSessions().catch(() => [])
+        if (records.some((r) => r.header.id === sessionId && r.live)) {
+          throw new Error('session is loaded in this runtime — switch away and retry')
         }
-        const key = `--${(readable.replace(/^-+/, '') || 'root').slice(0, 251)}--`
-        const root = path.join(home, 'sessions', key)
-        let dirs = []
-        try { dirs = fs.readdirSync(root, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name) } catch { return [] }
-        const out = []
-        for (const dir of dirs) {
-          const file = path.join(root, dir, 'session.jsonl.zstd')
-          let title = dir
-          let createdAt = 0
-          try {
-            const raw = zstdDecompressSync(fs.readFileSync(file))
-            const text = raw.toString('utf8')
-            const first = text.indexOf('\n')
-            const head = JSON.parse(text.slice(0, first))
-            createdAt = head.createdAt || 0
-            const ti = text.indexOf('"type":"session/title"')
-            if (ti !== -1) {
-              const tm = text.indexOf('"title":"', ti)
-              if (tm !== -1) {
-                const start = tm + 9
-                const end = text.indexOf('"', start)
-                if (end !== -1 && end > start) title = text.slice(start, end)
-              }
-            }
-          } catch { /* skip unreadable */ }
-          out.push({ id: dir, title, createdAt, current: agent?.session?.id === dir })
-        }
-        out.sort((a, b) => b.createdAt - a.createdAt)
-        return out
+        const root = path.resolve(home, 'sessions')
+        const dir = path.resolve(root, projectKey(process.cwd()), sessionId)
+        if (!/^session-[0-9a-f-]+$/i.test(sessionId)) throw new Error('invalid session id')
+        if (!dir.startsWith(root + path.sep)) throw new Error('refusing to delete outside the sessions root')
+        if (!fs.existsSync(dir)) throw new Error('session files not found on disk')
+        fs.rmSync(dir, { recursive: true, force: true })
+        return true
       },
       async switchSession(sessionId) {
         if (agent && agent.session.id === sessionId) return { agent, already: true }
+        // persisted sessions must be resumed (not created): create() refuses to
+        // publish over state the persistence layer already owns
         let created
         try {
-          created = await createAgentWithId(sessionId)
+          created = await agents.resume({
+            resumeSessionId: SessionId(sessionId),
+            agentOptions: { provider: selection.provider, model: selection.model },
+            setup: (agentCtx) => {
+              installModelSelection(agentCtx, { current: selection, assembled: void 0 })
+            },
+          })
         } catch (e) {
-          if (String(e.message).includes('already exists')) throw new Error('session is in use (current or another live one)')
+          if (String(e.message).includes('in use') || String(e.message).includes('already exists')) {
+            throw new Error('session is in use (current or another live one)')
+          }
           throw e
         }
-        agent = created.agent
+        adoptHandle(created)
         await agent.whenIdle()
         runtimeRef.sessionId = agent.session.id
-        runtimeRef.refreshStatus?.()
+        runtimeRef.sessionSwitched?.()
         return { agent }
       },
       async conversationHistory(agentObj) {
@@ -958,15 +1202,18 @@ async function main() {
         return msgs
       },
       dispose() {
+        retireHandle()
         try { ctx.fiber?.dispose?.() } catch { /* best effort */ }
       },
     }
   }
 
   // UI first: instant; boot the runtime in the background
-  const runtimeRef = { ready: false, sessionId: null, prompt: null, newSession: null, listSessions: null, switchSession: null, conversationHistory: null, readImage: null, dispose: null, onEvent: null, refreshStatus: null }
+  const runtimeRef = { ready: false, sessionId: null, prompt: null, newSession: null, listSessions: null, switchSession: null, deleteSession: null, forkSession: null, currentTitle: null, conversationHistory: null, readImage: null, dispose: null, onEvent: null, refreshStatus: null, sessionSwitched: null }
   const ui = setupUi(runtimeRef, { provider, model })
   runtimeRef.refreshStatus = () => ui.refreshStatus()
+  // a switched agent invalidates the old turn's busy state — settle on ready
+  runtimeRef.sessionSwitched = () => ui.onSessionSwitched()
   ui.setStarting()
   ;(async () => {
     try {
@@ -976,6 +1223,9 @@ async function main() {
       runtimeRef.newSession = runtime.newSession
       runtimeRef.listSessions = runtime.listSessions
       runtimeRef.switchSession = runtime.switchSession
+      runtimeRef.deleteSession = runtime.deleteSession
+      runtimeRef.forkSession = runtime.forkSession
+      runtimeRef.currentTitle = runtime.currentTitle
       runtimeRef.conversationHistory = runtime.conversationHistory
       runtimeRef.readImage = runtime.readImage
       runtimeRef.dispose = runtime.dispose
