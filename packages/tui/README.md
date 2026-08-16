@@ -28,6 +28,8 @@ Controls: type a prompt and Enter; `exit` / `/quit` / Ctrl-C to leave.
 | `/resume` | pick a recent session to switch to — the N newest non-current sessions, flat list (newest first); selecting one switches immediately |
 | `/resume <n>` | switch to the n-th most recent session |
 | `/fork` | branch a child session from this one (shown as a tree child in `/sessions`) |
+| `/export [dir]` | export the current session as markdown + JSON (default: current directory) |
+| `/compact` | summarize older turns to free the token budget (also automatic under pressure) |
 | `/new` | start a fresh session |
 | `/reload` | reload the config file (`~/.dsh/dsh-pi-tui/config.json` — theme, `/tools` mode; pi-style `/reload`) |
 | `/stop` | interrupt the running turn (same as `Esc`) |
@@ -126,6 +128,33 @@ cursor. Backends: `wl-paste` (Wayland), `xclip`/`xsel` (X11), `osascript`
 (fallback `vi`/`notepad`). The TUI yields the terminal to the editor; when it
 exits 0 the edited buffer replaces the input line.
 
+## Session export
+
+`/export` writes the current session to two files — a readable **markdown transcript**
+(user prompts, assistant answers, thinking blockquotes, tool calls/results, in log
+order) and a **full-fidelity JSON copy** (the raw event log, surface + log-only
+rows, parseable straight back into the dsh storage format). Files land in the
+current directory as `dsh-session-<shortId>-<YYYYMMDD-HHMMSS>.md` / `.json`;
+`/export <dir>` writes into that directory instead (created if missing). The
+snapshot is frozen per append, so exporting mid-turn is safe. The dsh ecosystem's
+`@deepseek-ai/dsh-session-log-export` is a Web-only browser download (host-streamed
+ZIP + browser save dialog), so the TUI writes the files itself from the in-process
+session log.
+
+## Compaction
+
+Long sessions are compacted automatically: the `pi-embed` profile's `dsh-base`
+bundle mounts the compaction backend (`@deepseek-ai/dsh-compaction-basic`,
+`auto: true`), which summarizes the oldest turns at step boundaries once the
+request approaches ~80% of the routed model's context window — no setup needed.
+`/compact` additionally triggers one manual compaction of the oldest balanced span
+right away (dsh's `@deepseek-ai/dsh-command-compact` over `ctx.compaction.compactNow`),
+reporting how many history items were replaced and the estimated token savings.
+Both paths replace the shadowed history with a single user-role summary checkpoint
+(the `<compacted-summary>` marker), which the TUI surfaces as a `♻ compacted …`
+line and renders as a *Context* entry in exports. After compaction the conversation
+continues normally on the summarized history.
+
 ## Models
 
 The model route is fixed at startup unless you switch it in-session: `/model`
@@ -159,6 +188,7 @@ aligned command/key reference.
 - v2.1 (done): loader spinner, app shortcuts, input history, session titles / delete / tree navigation
 - v2.2 (done): reasoning (thinking) blocks — collapsed one-line summary, Ctrl+T expand/collapse
 - v2.3 (done): session rename (Ctrl+R) + quick resume (`/resume`); status bar (cwd / token usage / persistent running-tool name / subagent marker), config persistence with `/reload`, clipboard paste (Ctrl+V) + external editor (Ctrl+G)
+- v2.4 (done): session export (`/export` markdown + JSON) and compaction (automatic under pressure + manual `/compact`)
 
 ## License
 

@@ -6,7 +6,7 @@
 // compose the pi-embed profile (base + prompt + fff + tools) in-process,
 // create an Agent directly, and render its session events live.
 //
-// Commands: /help /clear /theme (picker) /tools [on|off|full] /model (picker) /sessions /resume /fork /reload /new /stop /quit
+// Commands: /help /clear /theme (picker) /tools [on|off|full] /model (picker) /sessions /resume /fork /export [dir] /compact /reload /new /stop /quit
 // Shortcuts: Esc interrupt · Ctrl+N new session · Ctrl+T reasoning expand/collapse · Ctrl+P / Shift+Ctrl+P cycle model · Ctrl+O tool output expand · Ctrl+R rename session · Ctrl+K clear · Ctrl+Q quit · Ctrl+V paste · Ctrl+G external editor
 // Env: DSH_BIN unused here; DSH_PI_PROVIDER/DSH_PI_MODEL override the route; $VISUAL/$EDITOR pick the external editor.
 import { spawn, spawnSync } from 'node:child_process'
@@ -553,6 +553,118 @@ function toolResultMessage(d, names) {
   }
 }
 
+// ---- session export --------------------------------------------------------------
+// /export writes the live session log to a readable markdown transcript plus a
+// full-fidelity JSON copy. The dsh ecosystem's @deepseek-ai/dsh-session-log-export
+// is a Web-only browser download (host-streamed ZIP + browser save dialog), so the
+// TUI writes files itself from the in-process session.events snapshot. The markdown
+// keeps surface events only (what the TUI renders); JSON keeps the raw log verbatim.
+
+// Latest session/title event in the log — the same source the runtime's title
+// service folds (runtimeRef.currentTitle). Used for the markdown header.
+function sessionTitleFromEvents(events) {
+  let title = ''
+  for (const e of events || []) {
+    if (e.type === 'session/title' && e.data?.title) title = e.data.title
+  }
+  return title
+}
+
+// HH:MM:SS timestamp for markdown section headers.
+function exportTime(ms) {
+  const d = new Date(ms)
+  const p = (n) => String(n).padStart(2, '0')
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+}
+
+// The markdown transcript: user prompts, assistant answers (reasoning as a
+// blockquote, images as placeholders), and tool calls/results — in log order,
+// mirroring the TUI's rendered conversation. `names` correlates error results to
+// their tool names (same map the live render keeps).
+function exportSessionMarkdown({ id, title, createdAt, events }) {
+  const out = []
+  out.push(`# ${title || 'Untitled session'}`)
+  out.push('')
+  out.push(`- session: \`${id}\``)
+  if (createdAt) out.push(`- created: ${new Date(createdAt).toISOString()}`)
+  out.push(`- exported: ${new Date().toISOString()}`)
+  out.push(`- events: ${events?.length || 0}`)
+  out.push('')
+  const names = new Map() // callId -> tool name, for correlating error results
+  for (const e of events || []) {
+    const t = exportTime(e.time)
+    if (e.type === 'user/message') {
+      const txt = contentText(e.data?.content)
+      if (!txt) continue
+      const src = e.data?.source?.kind
+      out.push(`## ${src === 'user' ? 'You' : 'Context'} — ${t}`)
+      out.push('')
+      out.push(txt)
+      out.push('')
+    } else if (e.type === 'assistant/message') {
+      // reasoning precedes the answer in stream order; tool-call blocks inside
+      // the message are skipped — the standalone tool/call events render them
+      for (const b of e.data?.message?.content || []) {
+        if (b?.type === 'reasoning' && b.text) {
+          out.push(`> **thinking** — ${t}`)
+          out.push('>')
+          for (const l of String(b.text).split('\n')) out.push('> ' + l)
+          out.push('')
+        } else if (b?.type === 'text' && b.text) {
+          out.push(`## Assistant — ${t}`)
+          out.push('')
+          out.push(b.text)
+          out.push('')
+        } else if (b?.type === 'image') {
+          out.push(`[image: ${b.name || 'attachment'}]`)
+          out.push('')
+        }
+      }
+    } else if (e.type === 'tool/call') {
+      names.set(e.data?.callId, e.data?.name)
+      out.push(`### ⚙ ${e.data?.name || 'tool'} — ${t}`)
+      out.push('')
+      out.push('```json')
+      out.push(e.data?.arguments ?? '')
+      out.push('```')
+      out.push('')
+    } else if (e.type === 'tool/result') {
+      const r = toolResultMessage(e.data || {}, names)
+      if (!r) continue
+      out.push(`### ${r.kind === 'error' ? '✗ tool error' : '✓ tool result'} — ${t}`)
+      out.push('')
+      out.push(r.text.replace(/\x1b\[[0-9;]*m/g, '')) // strip ANSI styling
+      out.push('')
+    }
+  }
+  return out.join('\n').replace(/\n{3,}/g, '\n\n').trimEnd() + '\n'
+}
+
+// Full-fidelity JSON copy: the raw event log (surface + log-only rows) plus a
+// small session envelope. Parseable straight back into the dsh storage format.
+function exportSessionJson({ id, title, createdAt, events }) {
+  return JSON.stringify({
+    session: {
+      id,
+      title: title || null,
+      createdAt: createdAt || null,
+      exportedAt: new Date().toISOString(),
+    },
+    events: events || [],
+  }, null, 2) + '\n'
+}
+
+// File-name base for one export: dsh-session-<shortId>-<YYYYMMDD-HHMMSS>. Callers
+// append the extension (.md / .json).
+function exportFileName(id, when = new Date()) {
+  const short = String(id).replace(/^session-/, '').slice(0, 8)
+  const p = (n) => String(n).padStart(2, '0')
+  const stamp =
+    `${when.getFullYear()}${p(when.getMonth() + 1)}${p(when.getDate())}` +
+    `-${p(when.getHours())}${p(when.getMinutes())}${p(when.getSeconds())}`
+  return `dsh-session-${short}-${stamp}`
+}
+
 // ---- sessions --------------------------------------------------------------------
 
 // dsh's project-key normalization for the on-disk sessions root: separators ->
@@ -631,6 +743,9 @@ function setupUi(runtimeRef, modelInfo) {
   let toolsMode = cfg.toolsMode === 'off' || cfg.toolsMode === 'full' ? cfg.toolsMode : 'on' // /tools state: on (summaries) | full (everything) | off (folded)
   const messages = []
   const toolNames = new Map() // callId -> tool name, for correlating error results
+  // latest compaction/summary pricing (seqs + tokens) — paired with the following
+  // compaction/end to surface one user-visible line per compaction
+  let lastCompaction = null
   let currentAsst = null
   let asstText = ''
   let inText = false
@@ -671,6 +786,8 @@ function setupUi(runtimeRef, modelInfo) {
       { name: 'sessions', description: 'pick, switch or delete sessions', argumentHint: '[<n>|delete <n>]' },
       { name: 'resume', description: 'pick a recent session to switch to', argumentHint: '[<n>]' },
       { name: 'fork', description: 'branch a child session from this one' },
+      { name: 'export', description: 'export the session as markdown + JSON', argumentHint: '[<dir>]' },
+      { name: 'compact', description: 'compact the session history (summarize older turns)' },
       { name: 'new', description: 'start a fresh session' },
       { name: 'reload', description: 'reload the config file' },
       { name: 'stop', description: 'interrupt the running turn (Esc)' },
@@ -1062,6 +1179,17 @@ function setupUi(runtimeRef, modelInfo) {
       const r = toolResultMessage(d, toolNames)
       if (r) addMessage(r.kind, r.text, { summary: r.summary })
       for (const b of collectImageBlocks(d.message?.content || [])) addImageFromBlock(b, true)
+    } else if (event.type === 'compaction/summary') {
+      // log-only summary pricing the immediately following surface replacement
+      // (manual /compact or automatic pressure) — surfaced once at compaction/end
+      lastCompaction = { seqs: d.shadowedSeqs?.length || 0, tokens: d.shadowedTokenCount || 0 }
+    } else if (event.type === 'compaction/end') {
+      if (d.error) addMessage('sys', `♻ compaction failed: ${d.error}`)
+      else if (lastCompaction) {
+        addMessage('sys', `♻ compacted ${lastCompaction.seqs} history items (~${lastCompaction.tokens} tokens) — older turns summarized`)
+        flashStatus('ready')
+      }
+      lastCompaction = null
     }
   }
 
@@ -1085,6 +1213,8 @@ function setupUi(runtimeRef, modelInfo) {
       cmdRow('/resume', 'pick a recent session to switch to (Ctrl+R renames the current one)'),
       cmdRow('/resume <n>', 'switch to the n-th most recent session'),
       cmdRow('/fork', 'branch a child session from this one'),
+      cmdRow('/export [dir]', 'export the session as markdown + JSON (default: current directory)'),
+      cmdRow('/compact', 'summarize older turns to free the token budget (also automatic under pressure)'),
       cmdRow('/new', 'start a fresh session'),
       cmdRow('/reload', 'reload the config file (theme, /tools mode)'),
       cmdRow('/stop', 'interrupt the running turn (Esc)'),
@@ -1108,7 +1238,7 @@ function setupUi(runtimeRef, modelInfo) {
   }
 
   function clearView() {
-    cancelAsst(); cancelReasoning(); renderedImages.clear(); messages.length = 0; currentAsst = null; asstText = ''; reasoningMsg = null; reasoningText = ''; reasoningOpen = false; rebuild()
+    cancelAsst(); cancelReasoning(); renderedImages.clear(); messages.length = 0; currentAsst = null; asstText = ''; reasoningMsg = null; reasoningText = ''; reasoningOpen = false; lastCompaction = null; rebuild()
   }
   // transient notice: keep the spinner running if a turn is in flight
   function flashStatus(str) {
@@ -1396,6 +1526,7 @@ function setupUi(runtimeRef, modelInfo) {
       reasoningMsg = null
       reasoningText = ''
       reasoningOpen = false
+      lastCompaction = null
       rebuild() // unmount the old session's view before restoring the new one
       const restored = await runtimeRef.conversationHistory(r.agent)
       tokenTotal = restored.usageTotal || 0
@@ -1617,6 +1748,7 @@ function setupUi(runtimeRef, modelInfo) {
           reasoningMsg = null
           reasoningText = ''
           reasoningOpen = false
+          lastCompaction = null
           rebuild() // unmount the parent session's view before restoring the child's
           const restored = await runtimeRef.conversationHistory(r.agent)
           tokenTotal = restored.usageTotal || 0
@@ -1653,6 +1785,33 @@ function setupUi(runtimeRef, modelInfo) {
       case '/stop':
         interruptTurn()
         return true
+      case '/export': {
+        if (!runtimeRef.exportSession) { addMessage('sys', 'runtime not ready'); return true }
+        setStatus('… exporting session…')
+        runtimeRef.exportSession(arg || undefined).then((r) => {
+          addMessage('sys', `exported ${r.count} events → ${r.mdPath}`)
+          addMessage('sys', `json → ${r.jsonPath}`)
+          setStatus('ready')
+        }).catch((e) => {
+          addMessage('error', `export: ${e.message}`)
+          setStatus('ready')
+        })
+        return true
+      }
+      case '/compact': {
+        if (busy) { addMessage('sys', 'wait for the current turn to finish before compacting'); return true }
+        if (arg) { addMessage('sys', 'usage: /compact (no arguments)'); return true }
+        if (!runtimeRef.compact) { addMessage('sys', 'runtime not ready'); return true }
+        setStatus('… compacting…')
+        runtimeRef.compact().then((r) => {
+          addMessage('sys', r.text)
+          setStatus('ready')
+        }).catch((e) => {
+          addMessage('error', `compact: ${e.message}`)
+          setStatus('ready')
+        })
+        return true
+      }
       case '/quit':
       case 'exit':
         shutdown(); return true
@@ -1756,6 +1915,7 @@ function setupUi(runtimeRef, modelInfo) {
       activeToolCount = 0
       activeToolName = null
       subagentCount = 0
+      lastCompaction = null
       setStatus('ready')
     },
     fail(message) {
@@ -1824,7 +1984,10 @@ async function main() {
     ctx.on('subagent/end', () => { subagentCount = Math.max(0, subagentCount - 1); ui.setSubagents(subagentCount) })
 
     const sessionId = agent.session.id
-    return {
+    // /compact forwards this into ctx.llm.stream() (via command-compact), so a
+    // shutdown tears down an in-flight summarization call.
+    const compactSignal = new AbortController()
+    const runtime = {
       ctx,
       provider: selection.provider,
       model: selection.model,
@@ -2028,15 +2191,45 @@ async function main() {
         }
         return { msgs, usageTotal }
       },
+      async exportSession(dirArg) {
+        // write the live session log to markdown + JSON in <dirArg> (or cwd).
+        // The events snapshot is frozen per append, so this is safe mid-turn.
+        const events = agent.session.events
+        const id = agent.session.id
+        let title
+        try { title = ctx.sessionTitle?.get(agent.session)?.title } catch { title = undefined }
+        const base = exportFileName(id)
+        const dir = dirArg ? path.resolve(dirArg) : process.cwd()
+        fs.mkdirSync(dir, { recursive: true })
+        const mdPath = path.join(dir, base + '.md')
+        const jsonPath = path.join(dir, base + '.json')
+        fs.writeFileSync(mdPath, exportSessionMarkdown({ id, title, createdAt: agent.session.header?.createdAt, events }))
+        fs.writeFileSync(jsonPath, exportSessionJson({ id, title, createdAt: agent.session.header?.createdAt, events }))
+        return { mdPath, jsonPath, count: events.length }
+      },
+      async compact() {
+        // manual compaction through the dsh-native /compact command (command-compact
+        // over ctx.compaction.compactNow) — proper command/run + command/done
+        // lifecycle, exact result text, and the UI signal forwarded into the
+        // summarization call.
+        if (!ctx.commands) throw new Error('command registry unavailable')
+        if (!ctx.compaction) throw new Error('compaction backend unavailable — dsh-base without compaction')
+        const r = await ctx.commands.execute(agent, '/compact', compactSignal.signal)
+        if (!r) return { ok: false, text: '/compact is not registered in this runtime' }
+        return { ok: r.result?.kind === 'success', text: r.result?.text || 'compacted' }
+      },
       dispose() {
         retireHandle()
+        compactSignal.abort()
         try { ctx.fiber?.dispose?.() } catch { /* best effort */ }
       },
     }
+
+    return runtime
   }
 
   // UI first: instant; boot the runtime in the background
-  const runtimeRef = { ready: false, sessionId: null, prompt: null, interrupt: null, newSession: null, listSessions: null, switchSession: null, deleteSession: null, forkSession: null, renameSession: null, currentTitle: null, conversationHistory: null, readImage: null, dispose: null, onEvent: null, refreshStatus: null, sessionSwitched: null, setModel: null, listModels: null }
+  const runtimeRef = { ready: false, sessionId: null, prompt: null, interrupt: null, newSession: null, listSessions: null, switchSession: null, deleteSession: null, forkSession: null, renameSession: null, currentTitle: null, conversationHistory: null, readImage: null, dispose: null, onEvent: null, refreshStatus: null, sessionSwitched: null, setModel: null, listModels: null, exportSession: null, compact: null }
   const ui = setupUi(runtimeRef, { provider, model })
   runtimeRef.refreshStatus = () => ui.refreshStatus()
   // a switched agent invalidates the old turn's busy state — settle on ready
@@ -2060,6 +2253,8 @@ async function main() {
       runtimeRef.dispose = runtime.dispose
       runtimeRef.setModel = runtime.setModel
       runtimeRef.listModels = runtime.listModels
+      runtimeRef.exportSession = runtime.exportSession
+      runtimeRef.compact = runtime.compact
       runtimeRef.sessionId = runtime.sessionId
       runtime.onEvent((session, event) => ui.renderEvent(session, event))
       saveSessionId(runtime.sessionId)
@@ -2120,4 +2315,4 @@ function recentSessions(list, n) {
     .slice(0, n)
 }
 
-export { collectImageBlocks, contentText, reasoningBlocks, reasoningSummary, toolCallInfo, toolResultMessage, cycleModelSelection, resolveModelArg, formatTokens, shortenPath, pickImageMime, recentSessions }
+export { collectImageBlocks, contentText, reasoningBlocks, reasoningSummary, toolCallInfo, toolResultMessage, cycleModelSelection, resolveModelArg, formatTokens, shortenPath, pickImageMime, recentSessions, exportSessionMarkdown, exportSessionJson, exportFileName, sessionTitleFromEvents }

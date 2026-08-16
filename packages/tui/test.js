@@ -6,7 +6,7 @@
 // and each message carries a first-line summary for the collapsed /tools on
 // view. Also covers the nested content walkers used by image rendering and
 // history rebuilds.
-import { collectImageBlocks, contentText, reasoningBlocks, reasoningSummary, toolCallInfo, toolResultMessage, cycleModelSelection, resolveModelArg, formatTokens, shortenPath, pickImageMime, recentSessions } from './index.js'
+import { collectImageBlocks, contentText, reasoningBlocks, reasoningSummary, toolCallInfo, toolResultMessage, cycleModelSelection, resolveModelArg, formatTokens, shortenPath, pickImageMime, recentSessions, exportSessionMarkdown, exportSessionJson, exportFileName, sessionTitleFromEvents } from './index.js'
 
 let failed = 0
 function check(name, cond, detail) {
@@ -177,6 +177,54 @@ check('recentSessions caps at n', eq(recentSessions(SESSIONS, 2).length, 2), rec
 check('recentSessions defensive sort (unsorted input)', eq(recentSessions([SESSIONS[2], SESSIONS[3], SESSIONS[1], SESSIONS[0]], 10).map((s) => s.id).join(','), 's-new,s-mid,s-old'), recentSessions([SESSIONS[2], SESSIONS[3], SESSIONS[1], SESSIONS[0]], 10))
 check('recentSessions empty when only current', eq(recentSessions([SESSIONS[1]], 10).length, 0), recentSessions([SESSIONS[1]], 10))
 check('recentSessions does not mutate input', eq(SESSIONS.length, 4), SESSIONS)
+
+// ---- session export ---------------------------------------------------------
+// A realistic event log: title, a user turn with a tool call + result, and a
+// second user turn with reasoning + answer. Shapes mirror the live dsh log.
+const EXPORT_EVENTS = [
+  { type: 'session/title', seq: 0, time: 1700000000000, data: { title: 'My session' } },
+  { type: 'turn/start', seq: 1, time: 1700000001000, data: { turn: 1 } },
+  { type: 'user/message', seq: 2, time: 1700000001000, data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'list files' }] } },
+  { type: 'assistant/message', seq: 3, time: 1700000002000, data: { message: { content: [{ type: 'tool-call', name: 'bash', arguments: '{"cmd":"ls"}' }] } } },
+  { type: 'tool/call', seq: 4, time: 1700000002000, data: { callId: 'c1', name: 'bash', arguments: '{"cmd":"ls"}' } },
+  { type: 'tool/result', seq: 5, time: 1700000003000, data: { message: { content: [{ type: 'tool-result', content: [{ type: 'text', text: 'a.txt' }] }] } } },
+  { type: 'turn/end', seq: 6, time: 1700000004000, data: { turn: 1, reason: { kind: 'completed' } } },
+  { type: 'user/message', seq: 7, time: 1700000005000, data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'now summarize' }] } },
+  { type: 'assistant/message', seq: 8, time: 1700000006000, data: { message: { content: [
+    { type: 'reasoning', text: 'line one\nline two' },
+    { type: 'text', text: 'here is the summary' },
+  ] } } },
+]
+
+const md = exportSessionMarkdown({ id: 'session-12345678-abcd', title: 'My session', createdAt: 1700000000000, events: EXPORT_EVENTS })
+check('export markdown has title header', md.startsWith('# My session\n'), md.slice(0, 60))
+check('export markdown lists session id', md.includes('session: `session-12345678-abcd`'), md)
+check('export markdown includes user prompt', md.includes('## You') && md.includes('list files'), md)
+check('export markdown includes assistant answer', md.includes('## Assistant') && md.includes('here is the summary'), md)
+check('export markdown includes reasoning blockquote', md.includes('> **thinking**') && md.includes('> line one'), md)
+check('export markdown includes tool call with args', md.includes('### ⚙ bash') && md.includes('"cmd":"ls"'), md)
+check('export markdown includes tool result', md.includes('✓ tool result') && md.includes('a.txt'), md)
+check('export markdown skips log-only rows', !md.includes('turn/start') && !md.includes('reason:'), md)
+check('export markdown collapses blank runs', !md.includes('\n\n\n'), md)
+
+// title fallback from the log when no title arg is passed
+check('sessionTitleFromEvents picks the latest title', eq(sessionTitleFromEvents(EXPORT_EVENTS), 'My session'), sessionTitleFromEvents(EXPORT_EVENTS))
+const noTitle = exportSessionMarkdown({ id: 'session-x', events: [] })
+check('export markdown falls back for untitled/empty', noTitle.startsWith('# Untitled session') && noTitle.includes('events: 0'), noTitle)
+
+const json = JSON.parse(exportSessionJson({ id: 'session-12345678-abcd', title: 'My session', createdAt: 1, events: EXPORT_EVENTS }))
+check('export json round-trips all events', json.events.length === EXPORT_EVENTS.length && json.session.id === 'session-12345678-abcd', json)
+check('export json keeps raw event data', eq(json.events[1].data.turn, 1) && eq(json.events[4].data.callId, 'c1'), json.events)
+
+const base = exportFileName('session-12345678-abcd', new Date(2026, 0, 2, 3, 4, 5)) // local time
+check('export file name is dsh-session-<short>-<stamp>', eq(base, 'dsh-session-12345678-20260102-030405'), base)
+
+// a compaction checkpoint lands as a user/Context message (surface replace) and
+// renders as a Context section, not a prompt
+const compacted = exportSessionMarkdown({ id: 'session-x', events: [
+  { type: 'user/message', seq: 1, time: 1, data: { source: { kind: 'compact-checkpoint' }, content: [{ type: 'text', text: '<compacted-summary>…' }] } },
+] })
+check('export markdown labels compacted checkpoint as Context', compacted.includes('## Context') && compacted.includes('<compacted-summary>…'), compacted)
 
 console.log(failed ? `\n${failed} failure(s)` : '\nall tests passed')
 process.exit(failed ? 1 : 0)
