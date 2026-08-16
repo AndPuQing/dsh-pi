@@ -6,8 +6,8 @@
 // compose the pi-embed profile (base + prompt + fff + tools) in-process,
 // create an Agent directly, and render its session events live.
 //
-// Commands: /help /clear /theme (picker) /tools [on|off|full] /model (picker) /reload /new /stop /quit
-// Shortcuts: Esc interrupt · Ctrl+N new session · Ctrl+T reasoning expand/collapse · Ctrl+P / Shift+Ctrl+P cycle model · Ctrl+O tool output expand · Ctrl+K clear · Ctrl+Q quit · Ctrl+V paste · Ctrl+G external editor
+// Commands: /help /clear /theme (picker) /tools [on|off|full] /model (picker) /sessions /resume /fork /reload /new /stop /quit
+// Shortcuts: Esc interrupt · Ctrl+N new session · Ctrl+T reasoning expand/collapse · Ctrl+P / Shift+Ctrl+P cycle model · Ctrl+O tool output expand · Ctrl+R rename session · Ctrl+K clear · Ctrl+Q quit · Ctrl+V paste · Ctrl+G external editor
 // Env: DSH_BIN unused here; DSH_PI_PROVIDER/DSH_PI_MODEL override the route; $VISUAL/$EDITOR pick the external editor.
 import { spawn, spawnSync } from 'node:child_process'
 import { Buffer } from 'node:buffer'
@@ -31,6 +31,7 @@ import {
   Editor,
   getKeybindings,
   Image,
+  Input,
   KeybindingsManager,
   Loader,
   Markdown,
@@ -234,6 +235,10 @@ function readClipboardText() {
   if (!out || !out.length) return null
   return out.toString('utf8')
 }
+
+// /resume shows the N newest non-current sessions, flat and newest-first
+// (a quick switch — unlike /sessions' tree, which owns delete and forking)
+const RESUME_LIMIT = 10
 
 const LOGO = [
   '  ██████╗ ███████╗██╗  ██╗    ██████╗ ██╗',
@@ -664,6 +669,7 @@ function setupUi(runtimeRef, modelInfo) {
       { name: 'tools', description: 'fold/unfold/expand tool details', argumentHint: '[on|off|full]', getArgumentCompletions: () => ['on', 'off', 'full'].map((v) => ({ value: v, label: v })) },
       { name: 'model', description: 'switch model (picker)', argumentHint: '[<provider>/<model>]' },
       { name: 'sessions', description: 'pick, switch or delete sessions', argumentHint: '[<n>|delete <n>]' },
+      { name: 'resume', description: 'pick a recent session to switch to', argumentHint: '[<n>]' },
       { name: 'fork', description: 'branch a child session from this one' },
       { name: 'new', description: 'start a fresh session' },
       { name: 'reload', description: 'reload the config file' },
@@ -684,6 +690,7 @@ function setupUi(runtimeRef, modelInfo) {
       'app.interrupt': { defaultKeys: 'escape', description: 'Interrupt the running turn' },
       'app.session.new': { defaultKeys: 'ctrl+n', description: 'Start a fresh session' },
       'app.reasoning.toggle': { defaultKeys: 'ctrl+t', description: 'Expand/collapse reasoning (thinking)' },
+      'app.session.rename': { defaultKeys: 'ctrl+r', description: 'Rename the current session' },
       'app.model.cycleForward': { defaultKeys: 'ctrl+p', description: 'Cycle to next model' },
       'app.model.cycleBackward': { defaultKeys: 'shift+ctrl+p', description: 'Cycle to previous model' },
       'app.tools.expand': { defaultKeys: 'ctrl+o', description: 'Toggle tool output expansion' },
@@ -1075,6 +1082,8 @@ function setupUi(runtimeRef, modelInfo) {
       cmdRow('/sessions', 'pick a session from the tree (d = delete, Esc = cancel)'),
       cmdRow('/sessions <n>', 'switch to session #n'),
       cmdRow('/sessions delete <n>', 'delete session #n (never the current one)'),
+      cmdRow('/resume', 'pick a recent session to switch to (Ctrl+R renames the current one)'),
+      cmdRow('/resume <n>', 'switch to the n-th most recent session'),
       cmdRow('/fork', 'branch a child session from this one'),
       cmdRow('/new', 'start a fresh session'),
       cmdRow('/reload', 'reload the config file (theme, /tools mode)'),
@@ -1085,6 +1094,7 @@ function setupUi(runtimeRef, modelInfo) {
       keyRow('Esc', 'interrupt the running turn'),
       keyRow('Ctrl+N', 'new session'),
       keyRow('Ctrl+T', 'expand/collapse reasoning (thinking)'),
+      keyRow('Ctrl+R', 'rename the current session'),
       keyRow('Ctrl+P', 'next model (Shift+Ctrl+P = previous)'),
       keyRow('Ctrl+O', 'toggle tool output expansion (on <-> full)'),
       keyRow('Ctrl+K', 'clear the conversation view'),
@@ -1370,11 +1380,12 @@ function setupUi(runtimeRef, modelInfo) {
     if (m.kind === 'image') addImageMessage(m.base64, m.mimeType, { name: m.name, fromTool: m.fromTool })
     else addMessage(m.kind, m.text, { summary: m.summary })
   }
-  function switchToPick(list, n) {
-    const pick = buildSessionTree(list)[n - 1]?.node
-    if (!pick) { addMessage('sys', 'no session #' + n); return }
-    setStatus('… switching to ' + pick.title + '…')
-    runtimeRef.switchSession(pick.id).then(async (r) => {
+  // Shared switch path for /sessions <n> and /resume: switch to a session id,
+  // then restore its history (the tree-numbered and recent-list pickers both
+  // resolve to this, so ordering/numbering differences stay in their callers).
+  function switchToSessionId(sessionId, title) {
+    setStatus('… switching to ' + title + '…')
+    runtimeRef.switchSession(sessionId).then(async (r) => {
       if (r.already) { addMessage('sys', 'already on this session'); setStatus('ready'); return }
       cancelAsst()
       cancelReasoning()
@@ -1389,12 +1400,17 @@ function setupUi(runtimeRef, modelInfo) {
       const restored = await runtimeRef.conversationHistory(r.agent)
       tokenTotal = restored.usageTotal || 0
       for (const m of restored.msgs) restoreMessage(m)
-      addMessage('sys', 'switched to: ' + pick.title)
+      addMessage('sys', 'switched to: ' + title)
       setStatus('ready')
     }).catch((e) => {
       addMessage('error', `switch: ${e.message}`)
       setStatus('ready')
     })
+  }
+  function switchToPick(list, n) {
+    const pick = buildSessionTree(list)[n - 1]?.node
+    if (!pick) { addMessage('sys', 'no session #' + n); return }
+    switchToSessionId(pick.id, pick.title)
   }
 
   function deletePick(list, n) {
@@ -1409,6 +1425,91 @@ function setupUi(runtimeRef, modelInfo) {
       addMessage('sys', '! delete failed: ' + e.message)
       setStatus('ready')
     })
+  }
+
+  // ---- session resume (/resume) -----------------------------------------------
+  // Quick switch to a recent session: the N newest non-current sessions, flat
+  // and newest-first (unlike /sessions' tree — no delete/fork here), select to
+  // switch. Reuses listSessions + SelectList, same pattern as /sessions.
+  function openResumePicker() {
+    runtimeRef.listSessions?.().then((list) => {
+      const recent = recentSessions(list, RESUME_LIMIT)
+      if (!recent.length) { addMessage('sys', 'no other sessions yet — /new to start one'); return }
+      const items = recent.map((s) => ({
+        label: s.title,
+        value: s.id,
+        description: shortSessionId(s.id) + (s.parent ? ' · fork of ' + shortSessionId(s.parent) : ''),
+      }))
+      const sel = new SelectList(items, 10, pickerTheme)
+      sel.onSelect = (item) => {
+        closePicker()
+        switchToSessionId(item.value, item.label)
+      }
+      sel.onCancel = () => closePicker()
+      tui.showOverlay(sel)
+      tui.setFocus(sel)
+    })
+  }
+  function resumePick(list, n) {
+    const pick = recentSessions(list, RESUME_LIMIT)[n - 1]
+    if (!pick) { addMessage('sys', 'no recent session #' + n); return }
+    switchToSessionId(pick.id, pick.title)
+  }
+
+  // ---- session rename (Ctrl+R) -------------------------------------------------
+  // dsh owns titles: ctx.sessionTitle.rename() appends a user-sourced
+  // session/title event that pins the session (later prompts schedule no more
+  // automatic revisions) and persists with the session log. Status bar,
+  // /sessions tree and /resume all read the folded latest title, so a rename
+  // shows everywhere with no separate override file.
+  let renameState = null // { input } while the Ctrl+R dialog is open
+  function closeRename() {
+    if (!renameState) return
+    renameState = null
+    tui.hideOverlay()
+    tui.setFocus(editor)
+  }
+  // Focusable overlay: pi-tui routes input to the focused component's
+  // handleInput, so the dialog owns focus and forwards it to the Input child
+  // (same pattern as pi's session selector rename mode).
+  class RenameDialog extends VStack {
+    constructor(input, children) {
+      super(children)
+      this._input = input
+    }
+    get focused() { return this._input.focused }
+    set focused(v) { this._input.focused = v }
+    handleInput(data) { this._input.handleInput(data) }
+  }
+  function openRenameDialog() {
+    if (renameState) return // already open — Ctrl+R again is a no-op
+    if (!runtimeRef.renameSession) { addMessage('sys', 'runtime not ready'); return }
+    const input = new Input()
+    input.setValue(runtimeRef.currentTitle?.() || '')
+    const dialog = new RenameDialog(input, [
+      new Text(theme.help.header('rename session'), 1, 0),
+      new Spacer(1),
+      input,
+      new Spacer(1),
+      new Text(dim('Enter to save · Esc to cancel'), 1, 0),
+    ])
+    renameState = { input }
+    input.onSubmit = (value) => {
+      closeRename()
+      const title = String(value || '').trim()
+      if (!title) { addMessage('sys', 'rename cancelled — empty title'); return }
+      setStatus('… renaming…')
+      runtimeRef.renameSession(title).then((renamed) => {
+        addMessage('sys', `renamed session: “${renamed}”`)
+        setStatus('ready')
+      }).catch((e) => {
+        addMessage('error', `rename: ${e.message}`)
+        setStatus('ready')
+      })
+    }
+    input.onEscape = () => closeRename()
+    tui.showOverlay(dialog)
+    tui.setFocus(dialog)
   }
 
   function runCommand(text) {
@@ -1491,6 +1592,15 @@ function setupUi(runtimeRef, modelInfo) {
           runtimeRef.listSessions?.().then((list) => switchToPick(list, n))
         } else {
           openSessionPicker()
+        }
+        return true
+      }
+      case '/resume': {
+        const n = Number(arg)
+        if (n && Number.isInteger(n) && n >= 1) {
+          runtimeRef.listSessions?.().then((list) => resumePick(list, n))
+        } else {
+          openResumePicker()
         }
         return true
       }
@@ -1583,6 +1693,7 @@ function setupUi(runtimeRef, modelInfo) {
     if (kb.matches(data, 'app.clipboard.pasteImage')) { pasteClipboard(); return { consume: true } }
     if (kb.matches(data, 'app.editor.external')) { openExternalEditor(); return { consume: true } }
     if (kb.matches(data, 'app.reasoning.toggle')) { toggleReasoning(); return { consume: true } }
+    if (kb.matches(data, 'app.session.rename')) { openRenameDialog(); return { consume: true } }
     if (kb.matches(data, 'app.model.cycleForward')) { cycleModel('forward'); return { consume: true } }
     if (kb.matches(data, 'app.model.cycleBackward')) { cycleModel('backward'); return { consume: true } }
     if (kb.matches(data, 'app.tools.expand')) { toggleToolsExpand(); return { consume: true } }
@@ -1742,6 +1853,16 @@ async function main() {
       currentTitle() {
         // synchronous fold of the live log's latest session/title event
         try { return ctx.sessionTitle?.get(agent.session)?.title } catch { return undefined }
+      },
+      async renameSession(title) {
+        // dsh owns titles: rename() normalizes the input, supersedes in-flight
+        // automatic generation, appends a user-sourced session/title event and
+        // persists with the log — no TUI-side override file needed. The user
+        // title pins the session (later prompts stop re-titling it).
+        const svc = ctx.sessionTitle
+        if (!svc?.rename) throw new Error('session titles unavailable in this runtime')
+        const snapshot = svc.rename(agent.session, title)
+        return snapshot.title
       },
       newSession() {
         return createAgent().then((c) => {
@@ -1915,7 +2036,7 @@ async function main() {
   }
 
   // UI first: instant; boot the runtime in the background
-  const runtimeRef = { ready: false, sessionId: null, prompt: null, interrupt: null, newSession: null, listSessions: null, switchSession: null, deleteSession: null, forkSession: null, currentTitle: null, conversationHistory: null, readImage: null, dispose: null, onEvent: null, refreshStatus: null, sessionSwitched: null, setModel: null, listModels: null }
+  const runtimeRef = { ready: false, sessionId: null, prompt: null, interrupt: null, newSession: null, listSessions: null, switchSession: null, deleteSession: null, forkSession: null, renameSession: null, currentTitle: null, conversationHistory: null, readImage: null, dispose: null, onEvent: null, refreshStatus: null, sessionSwitched: null, setModel: null, listModels: null }
   const ui = setupUi(runtimeRef, { provider, model })
   runtimeRef.refreshStatus = () => ui.refreshStatus()
   // a switched agent invalidates the old turn's busy state — settle on ready
@@ -1931,6 +2052,7 @@ async function main() {
       runtimeRef.listSessions = runtime.listSessions
       runtimeRef.switchSession = runtime.switchSession
       runtimeRef.deleteSession = runtime.deleteSession
+      runtimeRef.renameSession = runtime.renameSession
       runtimeRef.forkSession = runtime.forkSession
       runtimeRef.currentTitle = runtime.currentTitle
       runtimeRef.conversationHistory = runtime.conversationHistory
@@ -1988,4 +2110,14 @@ function resolveModelArg(models, arg) {
   return matches.length === 1 ? matches[0] : undefined
 }
 
-export { collectImageBlocks, contentText, reasoningBlocks, reasoningSummary, toolCallInfo, toolResultMessage, cycleModelSelection, resolveModelArg, formatTokens, shortenPath, pickImageMime }
+// Newest-first slice of a session list, excluding the current session — the
+// /resume quick-switch target set. listSessions is already newest-first, but we
+// sort defensively so the picker order never depends on caller order.
+function recentSessions(list, n) {
+  return [...list]
+    .filter((s) => !s.current)
+    .sort((a, b) => b.createdAt - a.createdAt)
+    .slice(0, n)
+}
+
+export { collectImageBlocks, contentText, reasoningBlocks, reasoningSummary, toolCallInfo, toolResultMessage, cycleModelSelection, resolveModelArg, formatTokens, shortenPath, pickImageMime, recentSessions }

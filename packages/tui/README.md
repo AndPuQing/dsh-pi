@@ -25,13 +25,15 @@ Controls: type a prompt and Enter; `exit` / `/quit` / Ctrl-C to leave.
 | `/sessions` | open the session picker (tree view — select to switch, `d`/`x` deletes with confirmation, `Esc` cancels) |
 | `/sessions <n>` | switch to session #n (tree order) |
 | `/sessions delete <n>` | delete session #n (the current session is never deletable) |
+| `/resume` | pick a recent session to switch to — the N newest non-current sessions, flat list (newest first); selecting one switches immediately |
+| `/resume <n>` | switch to the n-th most recent session |
 | `/fork` | branch a child session from this one (shown as a tree child in `/sessions`) |
 | `/new` | start a fresh session |
 | `/reload` | reload the config file (`~/.dsh/dsh-pi-tui/config.json` — theme, `/tools` mode; pi-style `/reload`) |
 | `/stop` | interrupt the running turn (same as `Esc`) |
 | `/quit`, `exit` | leave |
 
-Sessions are displayed by their runtime-generated title (deterministic first-prompt fallback, then LLM-refined); forked sessions render indented under their parent so the picker navigates the session tree.
+Sessions are displayed by their runtime-generated title (deterministic first-prompt fallback, then LLM-refined); forked sessions render indented under their parent so the picker navigates the session tree. **Ctrl+R** renames the current session: the title is written through dsh's own title service (`session/title` event with a `user` source), which pins it — later prompts stop re-titling — and persists with the session log, so the new title shows in the status line, `/sessions` and `/resume` everywhere. `/resume` is the quick-switch entry: the most recent non-current sessions in a flat, newest-first list (current excluded — it is already active).
 
 Shortcuts (registered via pi-tui `KeybindingsManager`, ids mirror pi's `app.*` defaults):
 
@@ -40,6 +42,7 @@ Shortcuts (registered via pi-tui `KeybindingsManager`, ids mirror pi's `app.*` d
 | `Esc` | interrupt the running turn (no-op when idle) |
 | `Ctrl+N` | new session |
 | `Ctrl+T` | expand/collapse reasoning (thinking); `/theme` switches themes |
+| `Ctrl+R` | rename the current session (Enter saves, Esc cancels) |
 | `Ctrl+P` | cycle to the next model (`Shift+Ctrl+P` = previous); `/model` picks from a list |
 | `Ctrl+O` | toggle tool output expansion (`on` <-> `full`) |
 | `Ctrl+K` | clear the conversation view (shadows the editor's kill-to-line-end) |
@@ -155,7 +158,7 @@ aligned command/key reference.
 - v2 (done): slash commands, theme switching (default/light), tool-call folding, Ctrl-L clear, session continuity with self-heal
 - v2.1 (done): loader spinner, app shortcuts, input history, session titles / delete / tree navigation
 - v2.2 (done): reasoning (thinking) blocks — collapsed one-line summary, Ctrl+T expand/collapse
-- v2.3 (done): status bar (cwd / token usage / persistent running-tool name / subagent marker), config persistence with `/reload`, clipboard paste (Ctrl+V) + external editor (Ctrl+G)
+- v2.3 (done): session rename (Ctrl+R) + quick resume (`/resume`); status bar (cwd / token usage / persistent running-tool name / subagent marker), config persistence with `/reload`, clipboard paste (Ctrl+V) + external editor (Ctrl+G)
 
 ## License
 
