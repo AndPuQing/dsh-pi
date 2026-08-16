@@ -6,8 +6,8 @@
 // compose the pi-embed profile (base + prompt + fff + tools) in-process,
 // create an Agent directly, and render its session events live.
 //
-// Commands: /help /clear /theme (picker) /tools [on|off|full] /new /quit
-// Shortcuts: Ctrl+N new session · Ctrl+T theme · Ctrl+O tool output expand · Ctrl+K clear · Ctrl+Q quit
+// Commands: /help /clear /theme (picker) /tools [on|off|full] /new /stop /quit
+// Shortcuts: Esc interrupt · Ctrl+N new session · Ctrl+T theme · Ctrl+O tool output expand · Ctrl+K clear · Ctrl+Q quit
 // Env: DSH_BIN unused here; DSH_PI_PROVIDER/DSH_PI_MODEL override the route.
 import { spawnSync } from 'node:child_process'
 import { Buffer } from 'node:buffer'
@@ -450,6 +450,7 @@ function setupUi(runtimeRef, modelInfo) {
       { name: 'sessions', description: 'pick, switch or delete sessions', argumentHint: '[<n>|delete <n>]' },
       { name: 'fork', description: 'branch a child session from this one' },
       { name: 'new', description: 'start a fresh session' },
+      { name: 'stop', description: 'interrupt the running turn (Esc)' },
       { name: 'quit', description: 'leave' },
     ],
     process.cwd(),
@@ -463,6 +464,7 @@ function setupUi(runtimeRef, modelInfo) {
   setKeybindings(
     new KeybindingsManager({
       ...TUI_KEYBINDINGS,
+      'app.interrupt': { defaultKeys: 'escape', description: 'Interrupt the running turn' },
       'app.session.new': { defaultKeys: 'ctrl+n', description: 'Start a fresh session' },
       'app.theme.next': { defaultKeys: 'ctrl+t', description: 'Switch theme' },
       'app.tools.expand': { defaultKeys: 'ctrl+o', description: 'Toggle tool output expansion' },
@@ -675,6 +677,10 @@ function setupUi(runtimeRef, modelInfo) {
       } else if (reason.kind === 'max-tokens') {
         addMessage('sys', '⏹ output token limit reached')
         setStatus('ready')
+      } else if (reason.kind === 'aborted' && reason.reason?.kind === 'user') {
+        // live user interrupt (Escape / /stop): agent.cancel({ kind: 'user' })
+        addMessage('sys', '⏹ turn interrupted')
+        setStatus('ready')
       } else if (reason.kind === 'interrupted') {
         addMessage('sys', '⏹ turn interrupted (session restored)')
         setStatus('ready')
@@ -731,9 +737,11 @@ function setupUi(runtimeRef, modelInfo) {
       cmdRow('/sessions delete <n>', 'delete session #n (never the current one)'),
       cmdRow('/fork', 'branch a child session from this one'),
       cmdRow('/new', 'start a fresh session'),
+      cmdRow('/stop', 'interrupt the running turn (Esc)'),
       cmdRow('/quit, exit', 'leave'),
       '',
       t.header('keys'),
+      keyRow('Esc', 'interrupt the running turn'),
       keyRow('Ctrl+N', 'new session'),
       keyRow('Ctrl+T', `switch theme (cycles: ${themeNames.join(' -> ')})`),
       keyRow('Ctrl+O', 'toggle tool output expansion (on <-> full)'),
@@ -765,6 +773,23 @@ function setupUi(runtimeRef, modelInfo) {
     const names = Object.keys(THEMES)
     const next = names[(names.indexOf(theme.name) + 1) % names.length]
     runCommand('/theme ' + next)
+  }
+  // Escape / /stop: abort the running turn via the dsh agent's cancel. The
+  // cause flows into the turn/end reason ({ kind: 'aborted', reason: { kind:
+  // 'user' } }) which renderEvent surfaces as "⏹ turn interrupted". Idle
+  // turns are never cancelled (cancel is a no-op without active activity).
+  function interruptTurn() {
+    if (!busy) return
+    if (!runtimeRef.interrupt) {
+      addMessage('sys', 'interrupt unavailable — runtime still starting')
+      return
+    }
+    try {
+      runtimeRef.interrupt()
+      flashStatus('⏹ interrupting…')
+    } catch (e) {
+      addMessage('error', `interrupt: ${e.message}`)
+    }
   }
 
   // ---- session picker (tree) ----------------------------------------------------
@@ -997,6 +1022,9 @@ function setupUi(runtimeRef, modelInfo) {
           setStatus('ready')
         })
         return true
+      case '/stop':
+        interruptTurn()
+        return true
       case '/quit':
       case 'exit':
         shutdown(); return true
@@ -1038,6 +1066,12 @@ function setupUi(runtimeRef, modelInfo) {
     if (kb.matches(data, 'app.tools.expand')) { toggleToolsExpand(); return { consume: true } }
     if (kb.matches(data, 'app.clear')) { clearView(); return { consume: true } }
     if (kb.matches(data, 'app.quit')) { shutdown(); return { consume: true } }
+    // Escape interrupts the running turn; while idle, or when a picker or the
+    // editor autocomplete is up, Escape keeps its normal role (close/cancel).
+    if (kb.matches(data, 'app.interrupt') && busy && !tui.hasOverlay() && !editor.isShowingAutocomplete()) {
+      interruptTurn()
+      return { consume: true }
+    }
     // session picker: d/x deletes the selected session (confirmation follows)
     if (pickerState && !confirmingDelete && (data === 'd' || data === 'x')) {
       const item = pickerState.sel.getSelectedItem()
@@ -1148,6 +1182,13 @@ async function main() {
       },
       prompt(text) {
         agent.followup(createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }))
+      },
+      interrupt() {
+        // user-initiated abort of the active turn; the 'user' cause flows into
+        // the turn/end reason ({ kind: 'aborted', reason: { kind: 'user' } })
+        // so renderEvent can surface "⏹ turn interrupted". cancel is a no-op
+        // when the agent has no active activity (idle turns are untouched).
+        agent.cancel({ kind: 'user' })
       },
       async readImage(ref) {
         const store = ctx.attachments
@@ -1297,7 +1338,7 @@ async function main() {
   }
 
   // UI first: instant; boot the runtime in the background
-  const runtimeRef = { ready: false, sessionId: null, prompt: null, newSession: null, listSessions: null, switchSession: null, deleteSession: null, forkSession: null, currentTitle: null, conversationHistory: null, readImage: null, dispose: null, onEvent: null, refreshStatus: null, sessionSwitched: null }
+  const runtimeRef = { ready: false, sessionId: null, prompt: null, interrupt: null, newSession: null, listSessions: null, switchSession: null, deleteSession: null, forkSession: null, currentTitle: null, conversationHistory: null, readImage: null, dispose: null, onEvent: null, refreshStatus: null, sessionSwitched: null }
   const ui = setupUi(runtimeRef, { provider, model })
   runtimeRef.refreshStatus = () => ui.refreshStatus()
   // a switched agent invalidates the old turn's busy state — settle on ready
@@ -1308,6 +1349,7 @@ async function main() {
       ensureProfile()
       const runtime = await buildRuntime()
       runtimeRef.prompt = runtime.prompt
+      runtimeRef.interrupt = runtime.interrupt
       runtimeRef.newSession = runtime.newSession
       runtimeRef.listSessions = runtime.listSessions
       runtimeRef.switchSession = runtime.switchSession

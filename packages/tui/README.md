@@ -25,6 +25,7 @@ Controls: type a prompt and Enter; `exit` / `/quit` / Ctrl-C to leave.
 | `/sessions delete <n>` | delete session #n (the current session is never deletable) |
 | `/fork` | branch a child session from this one (shown as a tree child in `/sessions`) |
 | `/new` | start a fresh session |
+| `/stop` | interrupt the running turn (same as `Esc`) |
 | `/quit`, `exit` | leave |
 
 Sessions are displayed by their runtime-generated title (deterministic first-prompt fallback, then LLM-refined); forked sessions render indented under their parent so the picker navigates the session tree.
@@ -33,6 +34,7 @@ Shortcuts (registered via pi-tui `KeybindingsManager`, ids mirror pi's `app.*` d
 
 | Key | Action |
 |-----|--------|
+| `Esc` | interrupt the running turn (no-op when idle) |
 | `Ctrl+N` | new session |
 | `Ctrl+T` | switch theme (cycles); `/theme` picks from a list |
 | `Ctrl+O` | toggle tool output expansion (`on` <-> `full`) |
