@@ -6,7 +6,7 @@
 // and each message carries a first-line summary for the collapsed /tools on
 // view. Also covers the nested content walkers used by image rendering and
 // history rebuilds.
-import { collectImageBlocks, contentText, toolCallInfo, toolResultMessage } from './index.js'
+import { collectImageBlocks, contentText, reasoningBlocks, reasoningSummary, toolCallInfo, toolResultMessage } from './index.js'
 
 let failed = 0
 function check(name, cond, detail) {
@@ -101,6 +101,20 @@ check('contentText joins nested blocks', eq(contentText([txtBlock('a'), { type: 
 const img = { type: 'image', data: 'AAAA', mimeType: 'image/png' }
 check('collectImageBlocks walks nested tool-result', eq(collectImageBlocks([{ type: 'tool-result', content: [img] }]).length, 1))
 check('collectImageBlocks skips plain text', eq(collectImageBlocks([txtBlock('x')]).length, 0))
+
+// ---- reasoning (thinking) helpers -------------------------------------------------
+
+check('reasoningSummary collapsed = first line + hidden count', eq(JSON.stringify(reasoningSummary('step one\nstep two\nstep three')), JSON.stringify({ summary: 'step one', hidden: 2 })), reasoningSummary('step one\nstep two\nstep three'))
+check('reasoningSummary skips leading blank lines', eq(reasoningSummary('\n\n  the thought  \nmore').summary, 'the thought'), reasoningSummary('\n\n  the thought  \nmore'))
+const longThought = 'z'.repeat(500)
+check('reasoningSummary caps long first line', reasoningSummary(longThought + '\nrest').summary.length <= 241 && reasoningSummary(longThought).summary.endsWith('…'), reasoningSummary(longThought).summary.length)
+check('reasoningSummary empty -> ellipsis', eq(reasoningSummary('  \n').summary, '…'), reasoningSummary('  \n'))
+check('reasoningSummary single line -> no hidden', eq(reasoningSummary('only').hidden, 0), reasoningSummary('only'))
+
+const reasBlock = (text) => ({ type: 'reasoning', text })
+check('reasoningBlocks picks reasoning blocks in order', eq(reasoningBlocks([txtBlock('a'), reasBlock('think'), { type: 'image', data: 'x', mimeType: 'image/png' }, reasBlock('more')]).map((b) => b.text).join('|'), 'think|more'))
+check('reasoningBlocks ignores empty reasoning', eq(reasoningBlocks([reasBlock('')]).length, 0))
+check('reasoningBlocks ignores non-reasoning', eq(reasoningBlocks([txtBlock('a')]).length, 0))
 
 console.log(failed ? `\n${failed} failure(s)` : '\nall tests passed')
 process.exit(failed ? 1 : 0)

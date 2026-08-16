@@ -36,7 +36,7 @@ Shortcuts (registered via pi-tui `KeybindingsManager`, ids mirror pi's `app.*` d
 |-----|--------|
 | `Esc` | interrupt the running turn (no-op when idle) |
 | `Ctrl+N` | new session |
-| `Ctrl+T` | switch theme (cycles); `/theme` picks from a list |
+| `Ctrl+T` | expand/collapse reasoning (thinking); `/theme` switches themes |
 | `Ctrl+O` | toggle tool output expansion (`on` <-> `full`) |
 | `Ctrl+K` | clear the conversation view (shadows the editor's kill-to-line-end) |
 | `Ctrl+Q` | quit |
@@ -59,6 +59,18 @@ When a summary hides content, a dim `… N more lines — Ctrl+O expands` hint
 shows under the entry. `Ctrl+O` (pi-style) toggles between `on` and `full`;
 bare `/tools` cycles `off → on → full`. Failed tool results stay visible in
 `error` style in every mode — `full` only expands their payload.
+
+## Reasoning
+
+Reasoning (thinking) blocks — common with DeepSeek-family models, where they
+can dominate the output — stream into the TUI as their own block instead of
+being dropped. They render like pi's thinking blocks: **collapsed to a one-line
+summary by default**, dim-italic via the theme's `reasoning` style, with a
+`… N more lines — Ctrl+T expands` hint when content is hidden. `Ctrl+T`
+toggles every reasoning block between collapsed and expanded.
+
+Reasoning is kept separate from the answer text: `contentText`/history rebuilds
+skip it, so restoring a session shows the same collapsed summary.
 
 ## Images
 
@@ -88,6 +100,7 @@ aligned command/key reference.
 
 - v2 (done): slash commands, theme switching (default/light), tool-call folding, Ctrl-L clear, session continuity with self-heal
 - v2.1 (done): loader spinner, app shortcuts, input history, session titles / delete / tree navigation
+- v2.2 (done): reasoning (thinking) blocks — collapsed one-line summary, Ctrl+T expand/collapse
 
 ## License
 

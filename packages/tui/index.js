@@ -7,7 +7,7 @@
 // create an Agent directly, and render its session events live.
 //
 // Commands: /help /clear /theme (picker) /tools [on|off|full] /new /stop /quit
-// Shortcuts: Esc interrupt · Ctrl+N new session · Ctrl+T theme · Ctrl+O tool output expand · Ctrl+K clear · Ctrl+Q quit
+// Shortcuts: Esc interrupt · Ctrl+N new session · Ctrl+T reasoning expand/collapse · Ctrl+O tool output expand · Ctrl+K clear · Ctrl+Q quit
 // Env: DSH_BIN unused here; DSH_PI_PROVIDER/DSH_PI_MODEL override the route.
 import { spawnSync } from 'node:child_process'
 import { Buffer } from 'node:buffer'
@@ -122,6 +122,7 @@ const THEMES = {
     tool: (s) => `\x1b[36m⚙ ${s}\x1b[0m`,
     result: (s) => `\x1b[32m✓\x1b[0m ${s}`,
     error: (s) => `\x1b[31m✗ ${s}\x1b[0m`,
+    reasoning: (s) => `\x1b[3m\x1b[90m${s}\x1b[0m`, // dim italic — thinking is secondary to the answer
     help: {
       header: (s) => `\x1b[1m\x1b[90m${s}\x1b[0m`,
       cmd: (s) => `\x1b[36m${s}\x1b[0m`,
@@ -163,6 +164,7 @@ const THEMES = {
     tool: (s) => `\x1b[34m⚙ ${s}\x1b[0m`,
     result: (s) => `\x1b[32m✓\x1b[0m ${s}`,
     error: (s) => `\x1b[31m✗ ${s}\x1b[0m`,
+    reasoning: (s) => `\x1b[3m\x1b[34m${s}\x1b[0m`, // italic blue — thinking is secondary to the answer
     help: {
       header: (s) => `\x1b[1m\x1b[90m${s}\x1b[0m`,
       cmd: (s) => `\x1b[34m${s}\x1b[0m`,
@@ -278,6 +280,35 @@ function contentText(content) {
   }
   walk(content)
   return s
+}
+
+// ---- reasoning (thinking) block helpers ---------------------------------------
+// Reasoning streams arrive as assistant/chunk reasoning blocks (block-start with
+// blockType 'reasoning', reasoning-delta text, block-end carrying the full text)
+// and assemble into { type: 'reasoning', text } content blocks on
+// assistant/message. They render like pi's thinking blocks: collapsed to a
+// one-line summary by default, Ctrl+T expands/collapses (theme.reasoning style).
+const REASONING_SUMMARY_CAP = 240 // summary lines longer than this get an ellipsis
+
+// Collapsed view of one reasoning block: the first non-empty line, capped, plus
+// how many further lines the expand hides.
+function reasoningSummary(text) {
+  const lines = String(text ?? '').split('\n')
+  const idx = lines.findIndex((l) => l.trim().length > 0)
+  if (idx === -1) return { summary: '…', hidden: 0 }
+  let summary = lines[idx].trim()
+  if (summary.length > REASONING_SUMMARY_CAP) summary = summary.slice(0, REASONING_SUMMARY_CAP) + '…'
+  return { summary, hidden: lines.length - idx - 1 }
+}
+
+// The reasoning blocks embedded in one assistant message's content (stream
+// order: they precede the answer's text blocks).
+function reasoningBlocks(content) {
+  const out = []
+  for (const b of content || []) {
+    if (b?.type === 'reasoning' && b.text) out.push({ text: b.text })
+  }
+  return out
 }
 
 // ---- tool detail helpers -----------------------------------------------------
@@ -421,6 +452,13 @@ function setupUi(runtimeRef, modelInfo) {
   let currentAsst = null
   let asstText = ''
   let inText = false
+  // reasoning (thinking) block streaming: deltas accumulate into reasoningText,
+  // rendered as a 'reasoning' message collapsed to one line; Ctrl+T toggles
+  // reasoningExpanded for every reasoning block (pi-style thinking fold).
+  let reasoningOpen = false
+  let reasoningText = ''
+  let reasoningExpanded = false
+  let reasoningMsg = null // live { kind:'reasoning', live:true } message while streaming
   const queue = []
   // attachment ids already shown — the same image can arrive twice (streamed
   // chunk block-end + assembled assistant/message, or tool result + history)
@@ -466,7 +504,7 @@ function setupUi(runtimeRef, modelInfo) {
       ...TUI_KEYBINDINGS,
       'app.interrupt': { defaultKeys: 'escape', description: 'Interrupt the running turn' },
       'app.session.new': { defaultKeys: 'ctrl+n', description: 'Start a fresh session' },
-      'app.theme.next': { defaultKeys: 'ctrl+t', description: 'Switch theme' },
+      'app.reasoning.toggle': { defaultKeys: 'ctrl+t', description: 'Expand/collapse reasoning (thinking)' },
       'app.tools.expand': { defaultKeys: 'ctrl+o', description: 'Toggle tool output expansion' },
       'app.clear': { defaultKeys: ['ctrl+k', 'ctrl+l'], description: 'Clear the conversation view' },
       'app.quit': { defaultKeys: 'ctrl+q', description: 'Quit' },
@@ -517,6 +555,7 @@ function setupUi(runtimeRef, modelInfo) {
     if (m.kind === 'tool') return toolRender(m, t)
     if (m.kind === 'result') return resultRender(m, t)
     if (m.kind === 'error') return errorRender(m, t)
+    if (m.kind === 'reasoning') return reasoningRender(m, t)
     if (m.kind === 'user') return t.user(m.text)
     if (m.kind === 'help') return m.text // already styled by the help builder
     if (m.kind === 'logo') return t.logo(m.text)
@@ -616,6 +655,9 @@ function setupUi(runtimeRef, modelInfo) {
       else m.comp = new Text(renderText(m, t))
       container.addChild(m.comp)
     }
+    // a mid-stream rebuild (theme change, /clear, /tools…) recreates comps —
+    // re-link the live reasoning message so deltas keep updating it
+    reasoningMsg = messages.find((m) => m.kind === 'reasoning' && m.live) || null
     tui.requestRender()
   }
   function upsertAsst() {
@@ -657,12 +699,82 @@ function setupUi(runtimeRef, modelInfo) {
     }
   }
 
+  // ---- reasoning (thinking) streaming ---------------------------------------
+  // reasoningRender styles one reasoning message per the global fold state:
+  // collapsed -> first-line summary + dim '… N more lines — Ctrl+T expands' hint,
+  // expanded -> the full text. The dim hint mirrors the tool-detail affordance.
+  function reasoningRender(m, t) {
+    const { summary, hidden } = reasoningSummary(m.text)
+    if (reasoningExpanded) return t.reasoning(m.text)
+    const hint = hidden > 0 ? `\n  \x1b[90m… ${hidden} more line${hidden === 1 ? '' : 's'} — Ctrl+T expands\x1b[0m` : ''
+    return t.reasoning(summary) + hint
+  }
+
+  // mount/update the live reasoning message (deltas coalesced like asst text)
+  function upsertReasoning() {
+    if (!reasoningText) return
+    if (reasoningMsg) {
+      reasoningMsg.text = reasoningText
+      reasoningMsg.comp.setText(reasoningRender(reasoningMsg, theme))
+    } else {
+      reasoningMsg = { kind: 'reasoning', text: reasoningText, live: true, comp: null }
+      messages.push(reasoningMsg)
+      reasoningMsg.comp = new Text(reasoningRender(reasoningMsg, theme))
+      container.addChild(reasoningMsg.comp)
+    }
+    tui.requestRender()
+  }
+  let reasoningTimer = null
+  function scheduleReasoning() {
+    if (reasoningTimer) return
+    reasoningTimer = setTimeout(() => {
+      reasoningTimer = null
+      upsertReasoning()
+    }, 33)
+  }
+  function flushReasoning() {
+    if (!reasoningTimer) return
+    clearTimeout(reasoningTimer)
+    reasoningTimer = null
+    upsertReasoning()
+  }
+  function cancelReasoning() {
+    if (reasoningTimer) {
+      clearTimeout(reasoningTimer)
+      reasoningTimer = null
+    }
+  }
+  // close the open reasoning block: keep whatever text streamed (the block-end
+  // carries the authoritative full text) and detach it from the live stream
+  function finishReasoning(finalText) {
+    if (finalText) reasoningText = finalText
+    reasoningOpen = false
+    if (reasoningMsg) {
+      reasoningMsg.text = reasoningText
+      reasoningMsg.live = false
+      reasoningMsg.comp.setText(reasoningRender(reasoningMsg, theme))
+    }
+    reasoningMsg = null
+    reasoningText = ''
+  }
+
+  function toggleReasoning() {
+    reasoningExpanded = !reasoningExpanded
+    for (const m of messages) {
+      if (m.kind === 'reasoning' && m.comp) m.comp.setText(reasoningRender(m, theme))
+    }
+    tui.requestRender()
+    flashStatus(reasoningExpanded ? 'reasoning: expanded' : 'reasoning: collapsed')
+  }
+
   // live session-event stream from the in-process runtime
   function renderEvent(session, event) {
     const d = event.data || {}
     if (event.type === 'turn/start') setBusy('busy…')
     if (event.type === 'turn/end') {
       flushAsst()
+      flushReasoning()
+      if (reasoningOpen) finishReasoning() // interrupted mid-thinking: keep what streamed
       const reason = d.reason || {}
       if (reason.kind === 'error' && reason.error) {
         // model/provider failure: structured LlmFailure facts, rendered as an error block
@@ -690,13 +802,25 @@ function setupUi(runtimeRef, modelInfo) {
     }
     if (event.type === 'assistant/chunk') {
       const chunk = d.chunk || {}
-      if (chunk.type === 'block-start' && chunk.blockType === 'text') inText = true
-      else if (chunk.type === 'text-delta' && inText) {
+      if (chunk.type === 'block-start') {
+        if (chunk.blockType === 'text') inText = true
+        else if (chunk.blockType === 'reasoning') {
+          // a fresh thinking block (defensive: close any orphaned one first)
+          if (reasoningOpen && reasoningMsg) finishReasoning()
+          reasoningOpen = true
+          reasoningText = ''
+        }
+      } else if (chunk.type === 'text-delta' && inText) {
         asstText += chunk.text
         scheduleAsst()
+      } else if (chunk.type === 'reasoning-delta' && reasoningOpen) {
+        reasoningText += chunk.text
+        scheduleReasoning()
       } else if (chunk.type === 'block-end') {
-        // image output streams as one assembled block — mount it immediately
+        // image output streams as one assembled block — mount it immediately;
+        // reasoning blocks finalize with the full text the adapter assembled
         if (chunk.block?.type === 'image') addImageFromBlock(chunk.block, false)
+        else if (chunk.block?.type === 'reasoning' && reasoningOpen) finishReasoning(chunk.block.text)
         inText = false
       }
     } else if (event.type === 'assistant/message') {
@@ -743,7 +867,7 @@ function setupUi(runtimeRef, modelInfo) {
       t.header('keys'),
       keyRow('Esc', 'interrupt the running turn'),
       keyRow('Ctrl+N', 'new session'),
-      keyRow('Ctrl+T', `switch theme (cycles: ${themeNames.join(' -> ')})`),
+      keyRow('Ctrl+T', 'expand/collapse reasoning (thinking)'),
       keyRow('Ctrl+O', 'toggle tool output expansion (on <-> full)'),
       keyRow('Ctrl+K', 'clear the conversation view'),
       keyRow('Ctrl+Q', 'quit'),
@@ -754,7 +878,7 @@ function setupUi(runtimeRef, modelInfo) {
   }
 
   function clearView() {
-    cancelAsst(); renderedImages.clear(); messages.length = 0; currentAsst = null; asstText = ''; rebuild()
+    cancelAsst(); cancelReasoning(); renderedImages.clear(); messages.length = 0; currentAsst = null; asstText = ''; reasoningMsg = null; reasoningText = ''; reasoningOpen = false; rebuild()
   }
   // transient notice: keep the spinner running if a turn is in flight
   function flashStatus(str) {
@@ -768,11 +892,6 @@ function setupUi(runtimeRef, modelInfo) {
     toolsMode = toolsMode === 'full' ? 'on' : 'full'
     rebuild()
     flashStatus(`tool output: ${TOOLS_MODE_LABEL[toolsMode]}`)
-  }
-  function cycleTheme() {
-    const names = Object.keys(THEMES)
-    const next = names[(names.indexOf(theme.name) + 1) % names.length]
-    runCommand('/theme ' + next)
   }
   // Escape / /stop: abort the running turn via the dsh agent's cancel. The
   // cause flows into the turn/end reason ({ kind: 'aborted', reason: { kind:
@@ -903,10 +1022,14 @@ function setupUi(runtimeRef, modelInfo) {
     runtimeRef.switchSession(pick.id).then(async (r) => {
       if (r.already) { addMessage('sys', 'already on this session'); setStatus('ready'); return }
       cancelAsst()
+      cancelReasoning()
       renderedImages.clear()
       messages.length = 0
       currentAsst = null
       asstText = ''
+      reasoningMsg = null
+      reasoningText = ''
+      reasoningOpen = false
       rebuild() // unmount the old session's view before restoring the new one
       for (const m of await runtimeRef.conversationHistory(r.agent)) restoreMessage(m)
       addMessage('sys', 'switched to: ' + pick.title)
@@ -1000,10 +1123,14 @@ function setupUi(runtimeRef, modelInfo) {
         setStatus('… forking…')
         runtimeRef.forkSession?.().then(async (r) => {
           cancelAsst()
+          cancelReasoning()
           renderedImages.clear()
           messages.length = 0
           currentAsst = null
           asstText = ''
+          reasoningMsg = null
+          reasoningText = ''
+          reasoningOpen = false
           rebuild() // unmount the parent session's view before restoring the child's
           for (const m of await runtimeRef.conversationHistory(r.agent)) restoreMessage(m)
           addMessage('sys', `forked — child session, shared ${r.seedLength} events`)
@@ -1062,7 +1189,7 @@ function setupUi(runtimeRef, modelInfo) {
   tui.addInputListener((data) => {
     const kb = getKeybindings()
     if (kb.matches(data, 'app.session.new')) { runCommand('/new'); return { consume: true } }
-    if (kb.matches(data, 'app.theme.next')) { cycleTheme(); return { consume: true } }
+    if (kb.matches(data, 'app.reasoning.toggle')) { toggleReasoning(); return { consume: true } }
     if (kb.matches(data, 'app.tools.expand')) { toggleToolsExpand(); return { consume: true } }
     if (kb.matches(data, 'app.clear')) { clearView(); return { consume: true } }
     if (kb.matches(data, 'app.quit')) { shutdown(); return { consume: true } }
@@ -1111,6 +1238,10 @@ function setupUi(runtimeRef, modelInfo) {
     onSessionSwitched() {
       // the agent changed — the old turn's busy state is stale; settle on ready
       cancelAsst()
+      cancelReasoning()
+      reasoningOpen = false
+      reasoningMsg = null
+      reasoningText = ''
       setStatus('ready')
     },
     fail(message) {
@@ -1313,6 +1444,8 @@ async function main() {
             if (txt) msgs.push({ kind: 'user', text: txt })
           } else if (e.type === 'assistant/message') {
             const content = e.data.message?.content || []
+            // reasoning precedes the answer in stream order — restore it first
+            for (const b of reasoningBlocks(content)) msgs.push({ kind: 'reasoning', text: b.text })
             const txt = contentText(content)
             if (txt) msgs.push({ kind: 'asst', text: txt })
             for (const b of collectImageBlocks(content)) msgs.push(await imageOf(b, false))
@@ -1379,4 +1512,4 @@ if (process.env.DSH_PI_TUI_TEST !== '1') {
 }
 
 // pure content-block helpers, exported for tests (DSH_PI_TUI_TEST=1 skips main)
-export { collectImageBlocks, contentText, toolCallInfo, toolResultMessage }
+export { collectImageBlocks, contentText, reasoningBlocks, reasoningSummary, toolCallInfo, toolResultMessage }
