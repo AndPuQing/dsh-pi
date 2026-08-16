@@ -27,6 +27,7 @@ Controls: type a prompt and Enter; `exit` / `/quit` / Ctrl-C to leave.
 | `/sessions delete <n>` | delete session #n (the current session is never deletable) |
 | `/fork` | branch a child session from this one (shown as a tree child in `/sessions`) |
 | `/new` | start a fresh session |
+| `/reload` | reload the config file (`~/.dsh/dsh-pi-tui/config.json` — theme, `/tools` mode; pi-style `/reload`) |
 | `/stop` | interrupt the running turn (same as `Esc`) |
 | `/quit`, `exit` | leave |
 
@@ -42,6 +43,8 @@ Shortcuts (registered via pi-tui `KeybindingsManager`, ids mirror pi's `app.*` d
 | `Ctrl+P` | cycle to the next model (`Shift+Ctrl+P` = previous); `/model` picks from a list |
 | `Ctrl+O` | toggle tool output expansion (`on` <-> `full`) |
 | `Ctrl+K` | clear the conversation view (shadows the editor's kill-to-line-end) |
+| `Ctrl+V` | paste from the clipboard — image → inline preview + temp-file path in the input (the model reads it), text → inserted at the cursor |
+| `Ctrl+G` | edit the input in an external editor (`$VISUAL` / `$EDITOR`; result replaces the input line) |
 | `Ctrl+Q` | quit |
 | `Ctrl+L` | clear (legacy alias) |
 | `↑` / `↓` | browse input history (per-session, in-memory) |
@@ -75,6 +78,25 @@ toggles every reasoning block between collapsed and expanded.
 Reasoning is kept separate from the answer text: `contentText`/history rebuilds
 skip it, so restoring a session shows the same collapsed summary.
 
+## Status bar
+
+The status line under the input shows, left to right: the working directory
+(`process.cwd()`, ellipsized to its trailing segments when long), the active
+`provider/model`, the session title, the cumulative token usage (`≈12.3k tok`,
+from the runtime's per-step `usage` events), the running tool (`⚙ name…` —
+updated on every `tool/call`, cleared on `tool/result` and `turn/end`), and a
+`子代理运行中` marker while dsh subagents are running. Background subagents
+keep the marker after the delegating turn settles (`run_in_background`
+default), so you can see the parent went idle while children still work.
+
+## Config
+
+Lightweight UI prefs persist to `~/.dsh/dsh-pi-tui/config.json` (or
+`$DSH_HOME/dsh-pi-tui/config.json`): the active theme and the `/tools` mode.
+The file is written on every `/theme` / `/tools` change, read at startup, and
+re-applied by `/reload` (pi's `/reload` semantics — the live session keeps
+streaming). `DSH_PI_THEME` still overrides the configured theme for one run.
+
 ## Images
 
 When a tool result or the model output carries image blocks (durable dsh
@@ -86,6 +108,20 @@ fetched from the TUI — they show as `[image: <url>]`.
 
 Images from tool results fold with `/tools off`; image rendering survives
 `/clear` and session switches (images are rebuilt from the session log).
+Pasted clipboard images (Ctrl+V) preview the same way and reference a temp
+file in the input line.
+
+## Input
+
+`Ctrl+V` pastes the system clipboard: an image is saved to a temp file whose
+path lands in the input line (the model reads it through its file tools) and
+previewed inline with the `Image` component; plain text is inserted at the
+cursor. Backends: `wl-paste` (Wayland), `xclip`/`xsel` (X11), `osascript`
+(macOS), PowerShell (Windows); clipboard failures are silent.
+
+`Ctrl+G` opens the input in an external editor — `$VISUAL` or `$EDITOR`
+(fallback `vi`/`notepad`). The TUI yields the terminal to the editor; when it
+exits 0 the edited buffer replaces the input line.
 
 ## Models
 
@@ -110,13 +146,16 @@ aligned command/key reference.
 ## Env
 
 - `DSH_PI_PROVIDER` / `DSH_PI_MODEL` — override the model route (default: `agent-default-model` from `$DSH_HOME/settings.yaml`, else `opencode-go` / `deepseek-v4-flash`); in-session `/model` / `Ctrl+P` switches override this for the rest of the run and persist to `settings.yaml`
-- `DSH_HOME` — harness home (default `~/.dsh`)
+- `DSH_PI_THEME` — override the configured theme for one run (persisted `/theme` switches win on later runs)
+- `VISUAL` / `EDITOR` — external editor for `Ctrl+G` (fallback `vi`)
+- `DSH_HOME` — harness home (default `~/.dsh`); config lives at `$DSH_HOME/dsh-pi-tui/config.json`
 
 ## Roadmap
 
 - v2 (done): slash commands, theme switching (default/light), tool-call folding, Ctrl-L clear, session continuity with self-heal
 - v2.1 (done): loader spinner, app shortcuts, input history, session titles / delete / tree navigation
 - v2.2 (done): reasoning (thinking) blocks — collapsed one-line summary, Ctrl+T expand/collapse
+- v2.3 (done): status bar (cwd / token usage / persistent running-tool name / subagent marker), config persistence with `/reload`, clipboard paste (Ctrl+V) + external editor (Ctrl+G)
 
 ## License
 

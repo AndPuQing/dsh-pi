@@ -6,10 +6,10 @@
 // compose the pi-embed profile (base + prompt + fff + tools) in-process,
 // create an Agent directly, and render its session events live.
 //
-// Commands: /help /clear /theme (picker) /tools [on|off|full] /model (picker) /new /stop /quit
-// Shortcuts: Esc interrupt · Ctrl+N new session · Ctrl+T reasoning expand/collapse · Ctrl+P / Shift+Ctrl+P cycle model · Ctrl+O tool output expand · Ctrl+K clear · Ctrl+Q quit
-// Env: DSH_BIN unused here; DSH_PI_PROVIDER/DSH_PI_MODEL override the route.
-import { spawnSync } from 'node:child_process'
+// Commands: /help /clear /theme (picker) /tools [on|off|full] /model (picker) /reload /new /stop /quit
+// Shortcuts: Esc interrupt · Ctrl+N new session · Ctrl+T reasoning expand/collapse · Ctrl+P / Shift+Ctrl+P cycle model · Ctrl+O tool output expand · Ctrl+K clear · Ctrl+Q quit · Ctrl+V paste · Ctrl+G external editor
+// Env: DSH_BIN unused here; DSH_PI_PROVIDER/DSH_PI_MODEL override the route; $VISUAL/$EDITOR pick the external editor.
+import { spawn, spawnSync } from 'node:child_process'
 import { Buffer } from 'node:buffer'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -59,6 +59,181 @@ const IMAGE_MAX_WIDTH_CELLS = 60
 // Image theme: pi-tui's built-in text fallback on terminals without
 // Kitty/iTerm2 graphics support — dim gray like the status/dim accents
 const IMAGE_THEME = { fallbackColor: (s) => `\x1b[90m${s}\x1b[0m` }
+
+// ---- config persistence --------------------------------------------------------
+// Lightweight UI prefs (theme, /tools mode) persist to a JSON file under the
+// dsh-pi state dir. Loaded at startup, rewritten on every /theme and /tools
+// change, re-applied by /reload (pi's /reload semantics: re-read the on-disk
+// config and re-apply; the live session keeps streaming).
+const CONFIG_PATH = path.join(STATE_DIR, 'config.json')
+
+function loadConfig() {
+  try {
+    return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) || {}
+  } catch {
+    return {}
+  }
+}
+function saveConfig(cfg) {
+  try {
+    fs.mkdirSync(STATE_DIR, { recursive: true })
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2) + '\n')
+  } catch { /* best effort */ }
+}
+
+// ---- status display helpers (pure) --------------------------------------------
+
+// Compact path for the status line: keep the trailing segments that carry the
+// meaning, ellipsize the rest (…/very/long/path/to/here).
+function shortenPath(p, max = 48) {
+  const s = String(p)
+  if (s.length <= max) return s
+  const budget = Math.max(1, max - 1) // room for the leading ellipsis
+  const last = s.endsWith('/') ? s.length - 1 : s.length
+  // longest run of trailing segments that fits, starting at a segment boundary
+  let start = s.length
+  let idx = s.lastIndexOf('/', last - 1)
+  while (idx !== -1 && s.length - idx <= budget) {
+    start = idx
+    idx = s.lastIndexOf('/', idx - 1)
+  }
+  if (start === s.length) return '…' + s.slice(s.length - budget) // no '/' — hard cut
+  return '…' + s.slice(start)
+}
+
+// Human token count for the status line: 0 -> '0', 1234 -> '1.2k', 2.3M -> '2.3M'
+function formatTokens(n) {
+  const v = Math.max(0, Number(n) || 0)
+  if (v < 1000) return String(v)
+  if (v < 1_000_000) return (v / 1000).toFixed(1).replace(/\.0$/, '') + 'k'
+  return (v / 1_000_000).toFixed(1).replace(/\.0$/, '') + 'M'
+}
+
+// ---- clipboard helpers --------------------------------------------------------
+// Ctrl+V paste. Reads the system clipboard: image bytes when the clipboard
+// carries a bitmap, plain text otherwise. Backends: wl-paste (Wayland), xclip
+// (X11, xsel fallback), osascript (macOS), PowerShell (Windows). Every read is
+// timeout-bounded so a hung clipboard daemon never freezes the TUI.
+const CLIPBOARD_TIMEOUT_MS = 2000
+const CLIPBOARD_IMAGE_MIMES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif']
+
+function runClipboard(command, args, opts = {}) {
+  const r = spawnSync(command, args, {
+    timeout: CLIPBOARD_TIMEOUT_MS,
+    maxBuffer: 64 * 1024 * 1024,
+    ...opts,
+  })
+  if (r.error || r.status !== 0) return null
+  return r.stdout || Buffer.alloc(0)
+}
+
+// First supported bitmap mime from a `wl-paste --list-types` / `xclip -t
+// TARGETS -o` listing (e.g. 'image/png' or 'image/png\r'), or null.
+function pickImageMime(types) {
+  for (const raw of types || []) {
+    const base = String(raw).split(';')[0].trim().toLowerCase()
+    if (CLIPBOARD_IMAGE_MIMES.includes(base)) return base
+  }
+  return null
+}
+
+function clipboardImageWayland() {
+  const list = runClipboard('wl-paste', ['--list-types'])
+  if (!list) return null
+  const mime = pickImageMime(list.toString('utf8').split(/\r?\n/))
+  if (!mime) return null
+  const data = runClipboard('wl-paste', ['--type', mime, '--no-newline'])
+  return data && data.length ? { bytes: data, mimeType: mime } : null
+}
+
+function clipboardImageX11() {
+  const targets = runClipboard('xclip', ['-selection', 'clipboard', '-t', 'TARGETS', '-o'])
+  if (targets) {
+    const mime = pickImageMime(targets.toString('utf8').split(/\r?\n/))
+    if (!mime) return null
+    const data = runClipboard('xclip', ['-selection', 'clipboard', '-t', mime, '-o'])
+    return data && data.length ? { bytes: data, mimeType: mime } : null
+  }
+  // xsel fallback (no TARGETS listing; try png then jpeg blindly)
+  for (const mime of ['image/png', 'image/jpeg']) {
+    const data = runClipboard('xsel', ['--clipboard', '--output', '--mime-type', mime])
+    if (data && data.length) return { bytes: data, mimeType: mime }
+  }
+  return null
+}
+
+// macOS: write the clipboard bitmap to a temp file via osascript, then read it
+// back. PNG first (screenshots arrive as TIFF which converts cleanly), then
+// JPEG as a fallback.
+function clipboardImageMac() {
+  const info = runClipboard('osascript', ['-e', 'clipboard info'])
+  if (!info || !/PNGf|TIFF|JPEG/.test(info.toString('utf8'))) return null
+  const tmp = path.join(os.tmpdir(), `dsh-pi-clipboard-${randomUUID()}`)
+  const attempts = [
+    { ext: '.png', expr: 'the clipboard as «class PNGf»' },
+    { ext: '.jpg', expr: 'the clipboard as JPEG picture' },
+  ]
+  for (const { ext, expr } of attempts) {
+    const file = tmp + ext
+    const script = `set out to POSIX file "${file}"\nset img to ${expr}\nset fh to open for writing out\nwrite img to fh\nclose fh`
+    runClipboard('osascript', ['-e', script], { timeout: CLIPBOARD_TIMEOUT_MS * 2 })
+    try {
+      if (fs.statSync(file).size > 0) {
+        const bytes = fs.readFileSync(file)
+        fs.rmSync(file, { force: true })
+        return { bytes, mimeType: ext === '.png' ? 'image/png' : 'image/jpeg' }
+      }
+    } catch { /* try next */ }
+  }
+  return null
+}
+
+function clipboardImageWin() {
+  const tmp = path.join(os.tmpdir(), `dsh-pi-clipboard-${randomUUID()}.png`)
+  const script =
+    `Add-Type -AssemblyName System.Windows.Forms\n` +
+    `$i = [System.Windows.Forms.Clipboard]::GetImage()\n` +
+    `if ($i) { $i.Save('${tmp.replace(/'/g, "''")}', [System.Drawing.Imaging.ImageFormat]::Png) }`
+  runClipboard('powershell', ['-NoProfile', '-Command', script], { timeout: CLIPBOARD_TIMEOUT_MS * 2 })
+  try {
+    if (fs.statSync(tmp).size > 0) {
+      const bytes = fs.readFileSync(tmp)
+      fs.rmSync(tmp, { force: true })
+      return { bytes, mimeType: 'image/png' }
+    }
+  } catch { /* no image */ }
+  return null
+}
+
+function readClipboardImage() {
+  const p = process.platform
+  if (p === 'linux') {
+    if (process.env.WAYLAND_DISPLAY) {
+      const hit = clipboardImageWayland()
+      if (hit) return hit
+    }
+    return clipboardImageX11()
+  }
+  if (p === 'darwin') return clipboardImageMac()
+  if (p === 'win32') return clipboardImageWin()
+  return null
+}
+
+function readClipboardText() {
+  const p = process.platform
+  let out = null
+  if (p === 'linux') {
+    if (process.env.WAYLAND_DISPLAY) out = runClipboard('wl-paste', ['--no-newline'])
+    if (!out || !out.length) out = runClipboard('xclip', ['-selection', 'clipboard', '-o'])
+    if (!out || !out.length) out = runClipboard('xsel', ['--clipboard', '--output'])
+  } else if (p === 'darwin') {
+    out = runClipboard('osascript', ['-e', 'the clipboard as text'])
+  } else if (p === 'win32') {
+    out = runClipboard('powershell', ['-NoProfile', '-Command', 'Get-Clipboard -Raw'])
+  }
+  if (!out || !out.length) return null
+  return out.toString('utf8')
+}
 
 const LOGO = [
   '  ██████╗ ███████╗██╗  ██╗    ██████╗ ██╗',
@@ -443,10 +618,12 @@ function scanSessionsOnDisk(currentId) {
 function setupUi(runtimeRef, modelInfo) {
   const terminal = new ProcessTerminal()
   const tui = new TuiMainScreen(terminal)
-  let theme = THEMES[process.env.DSH_PI_THEME] || THEMES.default
+  // config.json under the state dir persists lightweight UI prefs (theme, /tools)
+  let cfg = loadConfig()
+  let theme = THEMES[process.env.DSH_PI_THEME] || THEMES[cfg.theme] || THEMES.default
   // model/session info is always visible in the status line
   const runtimeInfo = { provider: modelInfo?.provider || '', model: modelInfo?.model || '' }
-  let toolsMode = 'on' // /tools state: on (summaries) | full (everything) | off (folded)
+  let toolsMode = cfg.toolsMode === 'off' || cfg.toolsMode === 'full' ? cfg.toolsMode : 'on' // /tools state: on (summaries) | full (everything) | off (folded)
   const messages = []
   const toolNames = new Map() // callId -> tool name, for correlating error results
   let currentAsst = null
@@ -489,6 +666,7 @@ function setupUi(runtimeRef, modelInfo) {
       { name: 'sessions', description: 'pick, switch or delete sessions', argumentHint: '[<n>|delete <n>]' },
       { name: 'fork', description: 'branch a child session from this one' },
       { name: 'new', description: 'start a fresh session' },
+      { name: 'reload', description: 'reload the config file' },
       { name: 'stop', description: 'interrupt the running turn (Esc)' },
       { name: 'quit', description: 'leave' },
     ],
@@ -509,6 +687,8 @@ function setupUi(runtimeRef, modelInfo) {
       'app.model.cycleForward': { defaultKeys: 'ctrl+p', description: 'Cycle to next model' },
       'app.model.cycleBackward': { defaultKeys: 'shift+ctrl+p', description: 'Cycle to previous model' },
       'app.tools.expand': { defaultKeys: 'ctrl+o', description: 'Toggle tool output expansion' },
+      'app.clipboard.pasteImage': { defaultKeys: process.platform === 'win32' ? 'alt+v' : 'ctrl+v', description: 'Paste image or text from clipboard' },
+      'app.editor.external': { defaultKeys: 'ctrl+g', description: 'Edit input in an external editor' },
       'app.clear': { defaultKeys: ['ctrl+k', 'ctrl+l'], description: 'Clear the conversation view' },
       'app.quit': { defaultKeys: 'ctrl+q', description: 'Quit' },
     }),
@@ -516,13 +696,23 @@ function setupUi(runtimeRef, modelInfo) {
 
   let busy = false
   let statusState = ''
+  // status bar: cwd · provider/model · session · tokens · running tool · subagents
+  const cwdDisplay = shortenPath(process.cwd())
+  let tokenTotal = 0 // cumulative input+output tokens from assistant/message usage events
+  const activeToolIds = new Set() // callIds of tools still running
+  let activeToolCount = 0
+  let activeToolName = null
+  let subagentCount = 0 // live dsh subagents (subagent/start..end lifecycle events)
   function composeStatus(str) {
-    const parts = []
+    const parts = [cwdDisplay]
     if (runtimeInfo.model) parts.push(`${runtimeInfo.provider}/${runtimeInfo.model}`)
     if (runtimeRef.sessionId) {
       const title = runtimeRef.currentTitle?.()
       parts.push(title ? `“${title}”` : `session ${String(runtimeRef.sessionId).replace(/^session-/, '').slice(0, 8)}`)
     }
+    if (tokenTotal > 0) parts.push(`≈${formatTokens(tokenTotal)} tok`)
+    if (activeToolCount > 0) parts.push(`⚙ ${activeToolName}${activeToolCount > 1 ? ` +${activeToolCount - 1}` : ''}…`)
+    if (subagentCount > 0) parts.push(`子代理${subagentCount > 1 ? ` ×${subagentCount}` : ''}运行中`)
     parts.push(str)
     return parts.join(' · ')
   }
@@ -545,6 +735,12 @@ function setupUi(runtimeRef, modelInfo) {
   function refreshStatus() {
     if (busy) setBusy(statusState)
     else setStatus(statusState)
+  }
+  // re-compose the current status text without toggling the spinner — used when
+  // token usage, the running tool or the subagent count changes mid-turn
+  function updateStatusText() {
+    statusLoader.setMessage(composeStatus(statusState))
+    tui.requestRender()
   }
   function setModelInfo(provider, model) {
     runtimeInfo.provider = provider
@@ -775,6 +971,10 @@ function setupUi(runtimeRef, modelInfo) {
     const d = event.data || {}
     if (event.type === 'turn/start') setBusy('busy…')
     if (event.type === 'turn/end') {
+      // no tools survive a turn — clear the running-tool status state
+      activeToolIds.clear()
+      activeToolCount = 0
+      activeToolName = null
       flushAsst()
       flushReasoning()
       if (reasoningOpen) finishReasoning() // interrupted mid-thinking: keep what streamed
@@ -827,18 +1027,30 @@ function setupUi(runtimeRef, modelInfo) {
         inText = false
       }
     } else if (event.type === 'assistant/message') {
+      const u = d.usage
+      if (u) {
+        tokenTotal += (u.inputTokens || 0) + (u.outputTokens || 0)
+        updateStatusText()
+      }
       // assembled step message may carry image blocks (deduped against block-end)
       for (const b of collectImageBlocks(d.message?.content || [])) addImageFromBlock(b, false)
     } else if (event.type === 'tool/call') {
-      // surface the running tool in the spinner line (animation keeps going)
-      if (busy) {
-        statusLoader.setMessage(composeStatus(`⚙ ${d.name}…`))
-        tui.requestRender()
+      // keep the running tool name in the status line until its result arrives
+      if (!activeToolIds.has(d.callId)) {
+        activeToolIds.add(d.callId)
+        activeToolCount++
       }
+      activeToolName = d.name
+      updateStatusText()
       toolNames.set(d.callId, d.name)
       const info = toolCallInfo(d)
       addMessage('tool', info.text, { summary: info.summary })
     } else if (event.type === 'tool/result') {
+      if (activeToolIds.delete(d.callId)) {
+        activeToolCount = Math.max(0, activeToolCount - 1)
+        if (activeToolCount === 0) activeToolName = null
+        updateStatusText()
+      }
       // tool results nest their payload inside a tool-result block — walk it
       const r = toolResultMessage(d, toolNames)
       if (r) addMessage(r.kind, r.text, { summary: r.summary })
@@ -865,6 +1077,7 @@ function setupUi(runtimeRef, modelInfo) {
       cmdRow('/sessions delete <n>', 'delete session #n (never the current one)'),
       cmdRow('/fork', 'branch a child session from this one'),
       cmdRow('/new', 'start a fresh session'),
+      cmdRow('/reload', 'reload the config file (theme, /tools mode)'),
       cmdRow('/stop', 'interrupt the running turn (Esc)'),
       cmdRow('/quit, exit', 'leave'),
       '',
@@ -875,6 +1088,8 @@ function setupUi(runtimeRef, modelInfo) {
       keyRow('Ctrl+P', 'next model (Shift+Ctrl+P = previous)'),
       keyRow('Ctrl+O', 'toggle tool output expansion (on <-> full)'),
       keyRow('Ctrl+K', 'clear the conversation view'),
+      keyRow('Ctrl+V', 'paste image or text from the clipboard'),
+      keyRow('Ctrl+G', 'edit the input in an external editor ($VISUAL / $EDITOR)'),
       keyRow('Ctrl+Q', 'quit'),
       keyRow('Ctrl+L', 'clear (alias of Ctrl+K)'),
       keyRow('Ctrl+C', 'copy selection / cancel'),
@@ -964,6 +1179,91 @@ function setupUi(runtimeRef, modelInfo) {
     } catch (e) {
       addMessage('error', `interrupt: ${e.message}`)
     }
+  }
+
+  // ---- theme apply (persisted) ---------------------------------------------------
+  function applyTheme(name) {
+    const t = THEMES[name]
+    if (!t) return
+    theme = t
+    editor.borderColor = t.editor.borderColor
+    cfg.theme = t.name
+    saveConfig(cfg)
+    rebuild()
+  }
+
+  // ---- clipboard paste (Ctrl+V) --------------------------------------------------
+  // pi's Ctrl+V: image -> temp file whose path lands in the editor (the model
+  // reads it through its file tools) plus an inline preview via the Image
+  // component (data: URI path); text -> inserted at the cursor. Clipboard
+  // failures are silent — no daemon / no permission is a normal desktop state.
+  function pasteClipboard() {
+    let image = null
+    try { image = readClipboardImage() } catch { /* clipboard unavailable */ }
+    if (image) {
+      const ext = (image.mimeType.split('/')[1] || 'png').replace('jpeg', 'jpg')
+      const file = path.join(os.tmpdir(), `dsh-pi-clipboard-${randomUUID()}.${ext}`)
+      try {
+        fs.writeFileSync(file, image.bytes)
+      } catch (e) {
+        addMessage('sys', 'paste image: ' + e.message)
+        return
+      }
+      addImageFromBlock({ type: 'image', url: `data:${image.mimeType};base64,${image.bytes.toString('base64')}`, name: file }, false)
+      editor.insertTextAtCursor?.(file)
+      tui.requestRender()
+      return
+    }
+    const text = readClipboardText()
+    if (text) {
+      editor.insertTextAtCursor?.(text)
+      tui.requestRender()
+    }
+  }
+
+  // ---- external editor (Ctrl+G) --------------------------------------------------
+  // $VISUAL / $EDITOR (fallback vi/notepad); the TUI yields the terminal to the
+  // editor and the edited buffer replaces the input line when it exits 0.
+  function openExternalEditor() {
+    const cmd = process.env.VISUAL || process.env.EDITOR
+    if (!cmd) {
+      addMessage('sys', 'no external editor — set $VISUAL or $EDITOR')
+      return
+    }
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-pi-tui-edit-'))
+    const file = path.join(dir, 'prompt.md')
+    fs.writeFileSync(file, editor.getExpandedText?.() ?? editor.getText())
+    const [bin, ...args] = cmd.split(/\s+/)
+    let settled = false
+    const finish = (code) => {
+      if (settled) return
+      settled = true
+      tui.start()
+      tui.setFocus(editor)
+      try {
+        if (code === 0) {
+          const edited = fs.readFileSync(file, 'utf8').replace(/\n$/, '')
+          if (edited !== editor.getText()) editor.setText(edited)
+        } else {
+          addMessage('sys', 'editor exited with an error — input unchanged')
+        }
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true })
+      }
+      tui.requestRender()
+    }
+    tui.stop()
+    const child = spawn(bin, [...args, file], { stdio: 'inherit', shell: process.platform === 'win32' })
+    child.on('error', () => {
+      if (settled) return
+      settled = true
+      tui.start()
+      tui.setFocus(editor)
+      addMessage('sys', `editor '${bin}' not found`)
+      fs.rmSync(dir, { recursive: true, force: true })
+      tui.requestRender()
+    })
+    child.on('close', (code) => finish(code))
   }
 
   // ---- session picker (tree) ----------------------------------------------------
@@ -1086,7 +1386,9 @@ function setupUi(runtimeRef, modelInfo) {
       reasoningText = ''
       reasoningOpen = false
       rebuild() // unmount the old session's view before restoring the new one
-      for (const m of await runtimeRef.conversationHistory(r.agent)) restoreMessage(m)
+      const restored = await runtimeRef.conversationHistory(r.agent)
+      tokenTotal = restored.usageTotal || 0
+      for (const m of restored.msgs) restoreMessage(m)
       addMessage('sys', 'switched to: ' + pick.title)
       setStatus('ready')
     }).catch((e) => {
@@ -1119,7 +1421,7 @@ function setupUi(runtimeRef, modelInfo) {
       case '/clear': clearView(); return true
       case '/theme': {
         const t = THEMES[arg]
-        if (t) { theme = t; rebuild(); addMessage('sys', `theme: ${t.name}`) }
+        if (t) { applyTheme(t.name); addMessage('sys', `theme: ${t.name}`) }
         else if (arg) addMessage('sys', `unknown theme '${arg}' — ${Object.keys(THEMES).join(', ')}`)
         else {
           // interactive picker, same pattern as /sessions
@@ -1158,6 +1460,8 @@ function setupUi(runtimeRef, modelInfo) {
         else if (arg === 'on') toolsMode = 'on'
         else if (arg === 'full') toolsMode = 'full'
         else toolsMode = toolsMode === 'off' ? 'on' : toolsMode === 'on' ? 'full' : 'off' // bare /tools cycles
+        cfg.toolsMode = toolsMode
+        saveConfig(cfg)
         rebuild(); addMessage('sys', `tool details: ${TOOLS_MODE_LABEL[toolsMode]}`)
         flashStatus(`tool output: ${TOOLS_MODE_LABEL[toolsMode]}`)
         return true
@@ -1204,7 +1508,9 @@ function setupUi(runtimeRef, modelInfo) {
           reasoningText = ''
           reasoningOpen = false
           rebuild() // unmount the parent session's view before restoring the child's
-          for (const m of await runtimeRef.conversationHistory(r.agent)) restoreMessage(m)
+          const restored = await runtimeRef.conversationHistory(r.agent)
+          tokenTotal = restored.usageTotal || 0
+          for (const m of restored.msgs) restoreMessage(m)
           addMessage('sys', `forked — child session, shared ${r.seedLength} events`)
           setStatus('ready')
         }).catch((e) => {
@@ -1221,6 +1527,19 @@ function setupUi(runtimeRef, modelInfo) {
           setStatus('ready')
         })
         return true
+      case '/reload': {
+        // pi's /reload semantics: re-read the on-disk config and re-apply
+        cfg = loadConfig()
+        const t = THEMES[cfg.theme]
+        if (t) {
+          theme = t
+          editor.borderColor = t.editor.borderColor
+        }
+        if (cfg.toolsMode === 'off' || cfg.toolsMode === 'full') toolsMode = cfg.toolsMode
+        rebuild()
+        addMessage('sys', `config reloaded — theme ${theme.name}, tool details ${TOOLS_MODE_LABEL[toolsMode]}`)
+        return true
+      }
       case '/stop':
         interruptTurn()
         return true
@@ -1261,6 +1580,8 @@ function setupUi(runtimeRef, modelInfo) {
   tui.addInputListener((data) => {
     const kb = getKeybindings()
     if (kb.matches(data, 'app.session.new')) { runCommand('/new'); return { consume: true } }
+    if (kb.matches(data, 'app.clipboard.pasteImage')) { pasteClipboard(); return { consume: true } }
+    if (kb.matches(data, 'app.editor.external')) { openExternalEditor(); return { consume: true } }
     if (kb.matches(data, 'app.reasoning.toggle')) { toggleReasoning(); return { consume: true } }
     if (kb.matches(data, 'app.model.cycleForward')) { cycleModel('forward'); return { consume: true } }
     if (kb.matches(data, 'app.model.cycleBackward')) { cycleModel('backward'); return { consume: true } }
@@ -1309,6 +1630,10 @@ function setupUi(runtimeRef, modelInfo) {
     },
     refreshStatus,
     setModelInfo,
+    setSubagents(n) {
+      subagentCount = Math.max(0, n)
+      updateStatusText()
+    },
     onSessionSwitched() {
       // the agent changed — the old turn's busy state is stale; settle on ready
       cancelAsst()
@@ -1316,6 +1641,10 @@ function setupUi(runtimeRef, modelInfo) {
       reasoningOpen = false
       reasoningMsg = null
       reasoningText = ''
+      activeToolIds.clear()
+      activeToolCount = 0
+      activeToolName = null
+      subagentCount = 0
       setStatus('ready')
     },
     fail(message) {
@@ -1366,12 +1695,22 @@ async function main() {
       retireHandle()
       handle = h
       agent = h.agent
+      // the new agent's subagents start from zero; late end events for the old
+      // agent's children are clamped
+      subagentCount = 0
+      ui.setSubagents(0)
     }
 
     const created = await createAgent()
     handle = created
     agent = created.agent
     await agent.whenIdle()
+
+    // dsh subagent lifecycle: surfaces background subagent runs in the status
+    // line even after the delegating turn settles (run_in_background default).
+    let subagentCount = 0
+    ctx.on('subagent/start', () => { subagentCount++; ui.setSubagents(subagentCount) })
+    ctx.on('subagent/end', () => { subagentCount = Math.max(0, subagentCount - 1); ui.setSubagents(subagentCount) })
 
     const sessionId = agent.session.id
     return {
@@ -1524,6 +1863,7 @@ async function main() {
       },
       async conversationHistory(agentObj) {
         const msgs = []
+        let usageTotal = 0 // cumulative input+output tokens, restored into the status line
         const names = new Map() // callId -> tool name, for correlating error results
         const imageOf = async (b, fromTool) => {
           if (b.data && b.mimeType) return { kind: 'image', base64: b.data, mimeType: b.mimeType, name: b.name, fromTool }
@@ -1546,6 +1886,8 @@ async function main() {
             if (txt) msgs.push({ kind: 'user', text: txt })
           } else if (e.type === 'assistant/message') {
             const content = e.data.message?.content || []
+            const u = e.data.usage
+            if (u) usageTotal += (u.inputTokens || 0) + (u.outputTokens || 0)
             // reasoning precedes the answer in stream order — restore it first
             for (const b of reasoningBlocks(content)) msgs.push({ kind: 'reasoning', text: b.text })
             const txt = contentText(content)
@@ -1563,7 +1905,7 @@ async function main() {
             for (const b of collectImageBlocks(e.data.message?.content || [])) msgs.push(await imageOf(b, true))
           }
         }
-        return msgs
+        return { msgs, usageTotal }
       },
       dispose() {
         retireHandle()
@@ -1646,4 +1988,4 @@ function resolveModelArg(models, arg) {
   return matches.length === 1 ? matches[0] : undefined
 }
 
-export { collectImageBlocks, contentText, reasoningBlocks, reasoningSummary, toolCallInfo, toolResultMessage, cycleModelSelection, resolveModelArg }
+export { collectImageBlocks, contentText, reasoningBlocks, reasoningSummary, toolCallInfo, toolResultMessage, cycleModelSelection, resolveModelArg, formatTokens, shortenPath, pickImageMime }

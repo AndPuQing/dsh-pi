@@ -6,7 +6,7 @@
 // and each message carries a first-line summary for the collapsed /tools on
 // view. Also covers the nested content walkers used by image rendering and
 // history rebuilds.
-import { collectImageBlocks, contentText, reasoningBlocks, reasoningSummary, toolCallInfo, toolResultMessage, cycleModelSelection, resolveModelArg } from './index.js'
+import { collectImageBlocks, contentText, reasoningBlocks, reasoningSummary, toolCallInfo, toolResultMessage, cycleModelSelection, resolveModelArg, formatTokens, shortenPath, pickImageMime } from './index.js'
 
 let failed = 0
 function check(name, cond, detail) {
@@ -136,6 +136,31 @@ check('resolve bare model id (unique across providers)', eq(resolveModelArg(MODE
 check('resolve bare model id unique', eq(resolveModelArg([MODELS[0], MODELS[1]], 'deepseek-v4-pro'), MODELS[1]), resolveModelArg([MODELS[0], MODELS[1]], 'deepseek-v4-pro'))
 check('resolve unknown model is undefined', resolveModelArg(MODELS, 'gpt-99') === undefined)
 check('resolve unknown provider is undefined', resolveModelArg(MODELS, 'nope/deepseek-v4-flash') === undefined)
+
+// ---- status display helpers -----------------------------------------------------
+
+check('formatTokens small numbers stay raw', eq(formatTokens(0), '0') && eq(formatTokens(999), '999'), formatTokens(999))
+check('formatTokens k suffix with one decimal', eq(formatTokens(1234), '1.2k'), formatTokens(1234))
+check('formatTokens drops trailing .0', eq(formatTokens(2000), '2k'), formatTokens(2000))
+check('formatTokens rounds up', eq(formatTokens(1999), '2k'), formatTokens(1999))
+check('formatTokens M suffix', eq(formatTokens(2300000), '2.3M'), formatTokens(2300000))
+check('formatTokens clamps negatives', eq(formatTokens(-5), '0'), formatTokens(-5))
+
+check('shortenPath keeps short paths', eq(shortenPath('/a/b/c'), '/a/b/c'))
+const longPath = '/home/user/projects/very/long/path/to/somewhere/deep'
+const short = shortenPath(longPath)
+check('shortenPath truncates long paths', short.length <= 48 && short.startsWith('…'), short)
+check('shortenPath keeps the meaningful tail', short.endsWith('deep') && short.includes('/somewhere'), short)
+check('shortenPath wide max is a no-op', eq(shortenPath('/a/b', 1000), '/a/b'))
+
+// ---- clipboard mime picking ------------------------------------------------------
+
+check('pickImageMime picks the first supported', eq(pickImageMime(['text/plain', 'image/png', 'image/jpeg']), 'image/png'), pickImageMime(['text/plain', 'image/png', 'image/jpeg']))
+check('pickImageMime lowercases + trims', eq(pickImageMime(['IMAGE/PNG ']), 'image/png'), pickImageMime(['IMAGE/PNG ']))
+check('pickImageMime handles CRLF listings', eq(pickImageMime(['text/plain\r', 'image/webp\r']), 'image/webp'), pickImageMime(['text/plain\r', 'image/webp\r']))
+check('pickImageMime skips mime params', eq(pickImageMime(['image/png; charset=utf-8']), 'image/png'), pickImageMime(['image/png; charset=utf-8']))
+check('pickImageMime none -> null', pickImageMime(['text/plain']) === null)
+check('pickImageMime empty -> null', pickImageMime([]) === null)
 
 console.log(failed ? `\n${failed} failure(s)` : '\nall tests passed')
 process.exit(failed ? 1 : 0)
