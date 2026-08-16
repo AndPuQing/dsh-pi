@@ -102,6 +102,23 @@ export default {
       return args.path ? path.resolve(wd, args.path) : wd
     }
 
+    // pi-style path semantics: a `path` argument constrains where to search.
+    // A directory is the search root as-is. A FILE resolves to its parent
+    // directory with the file name kept as a result filter, so searching a
+    // single file (e.g. `path: "src/foo.py"`) finds matches instead of
+    // silently scanning nothing. Missing paths pass through untouched so
+    // FileFinder surfaces a clear init error.
+    function resolveSearchRoot(base) {
+      try {
+        if (fs.statSync(base).isFile()) {
+          return { root: path.dirname(base), only: path.basename(base) }
+        }
+      } catch {
+        /* missing path — let FileFinder.create surface the error */
+      }
+      return { root: base, only: null }
+    }
+
     ctx.tools.register(
       defineTool({
         name: 'ffgrep',
@@ -115,7 +132,8 @@ export default {
           },
           path: {
             type: 'string',
-            description: 'Directory to search in. Defaults to the session workspace.',
+            description:
+              'Directory to search in, or a file to search (a file path searches just that file). Defaults to the session workspace.',
           },
           limit: {
             type: 'number',
@@ -148,7 +166,8 @@ export default {
         },
         async execute(args, exec) {
           const base = resolveBase(args, exec)
-          const { finder, ready } = await getFinder(base)
+          const { root, only } = resolveSearchRoot(base)
+          const { finder, ready } = await getFinder(root)
           await ready
           let mode = hasRegexSyntax(args.pattern) ? 'regex' : 'plain'
           if (mode === 'regex') {
@@ -161,12 +180,15 @@ export default {
           const limit = Math.max(1, args.limit ?? DEFAULT_GREP_LIMIT)
           const res = finder.grep(args.pattern, { mode, pageSize: limit })
           if (!res.ok) throw new Error(res.error)
-          const items = res.value.items.map((m) => ({
+          const matched = only
+            ? res.value.items.filter((m) => m.relativePath === only)
+            : res.value.items
+          const items = matched.map((m) => ({
             path: m.relativePath,
             line: m.lineNumber,
             content: m.lineContent,
           }))
-          return { root: base, count: items.length, items }
+          return { root, count: items.length, items }
         },
       }),
     )
@@ -183,7 +205,8 @@ export default {
           },
           path: {
             type: 'string',
-            description: 'Directory to search in. Defaults to the session workspace.',
+            description:
+              'Directory to search in; a file path searches its parent directory. Defaults to the session workspace.',
           },
           limit: {
             type: 'number',
@@ -223,7 +246,8 @@ export default {
         },
         async execute(args, exec) {
           const base = resolveBase(args, exec)
-          const { finder, ready } = await getFinder(base)
+          const { root } = resolveSearchRoot(base)
+          const { finder, ready } = await getFinder(root)
           await ready
           const limit = Math.max(1, args.limit ?? DEFAULT_FIND_LIMIT)
           const res = finder.fileSearch(args.pattern, { pageSize: limit })
@@ -238,7 +262,7 @@ export default {
             path: i.relativePath,
             frecency: i.accessFrecencyScore ?? 0,
           }))
-          return { root: base, count: items.length, items }
+          return { root, count: items.length, items }
         },
       }),
     )

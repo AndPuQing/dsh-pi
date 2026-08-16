@@ -29,6 +29,12 @@ The bundle auto-registers in the profile manifest (adds a `dsh-pi-tools` row mou
 
 `fffind`: `pattern` (required) · `path` (default: session workspace) · `limit` (default 30)
 
+`path` follows pi's filter semantics: a directory scopes the search to that
+tree, and a **file path** scopes `ffgrep` to just that file (resolved to its
+parent directory with the file name kept as a result filter) — searching a
+single file finds matches instead of silently scanning nothing. Missing paths
+surface a clear init error.
+
 Output matches pi-fff's format: per-file blocks in frecency order, `path:line: content`,
 with `[VERY often touched file]` / `[often touched file]` annotations for hot files.
 
