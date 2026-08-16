@@ -19,7 +19,7 @@ Controls: type a prompt and Enter; `exit` / `/quit` / Ctrl-C to leave.
 | `/help` | show help |
 | `/clear` | clear the conversation view (session stays) |
 | `/theme <name>` | switch theme (`default`, `light`) |
-| `/tools [on|off]` | fold/unfold tool-call details |
+| `/tools [on|off|full]` | tool details: `on` = first-line summaries (default), `full` = complete output, `off` = folded (bare `/tools` cycles) |
 | `/sessions` | open the session picker (tree view — select to switch, `d`/`x` deletes with confirmation, `Esc` cancels) |
 | `/sessions <n>` | switch to session #n (tree order) |
 | `/sessions delete <n>` | delete session #n (the current session is never deletable) |
@@ -35,10 +35,28 @@ Shortcuts (registered via pi-tui `KeybindingsManager`, ids mirror pi's `app.*` d
 |-----|--------|
 | `Ctrl+N` | new session |
 | `Ctrl+T` | switch theme (cycles); `/theme` picks from a list |
+| `Ctrl+O` | toggle tool output expansion (`on` <-> `full`) |
 | `Ctrl+K` | clear the conversation view (shadows the editor's kill-to-line-end) |
 | `Ctrl+Q` | quit |
 | `Ctrl+L` | clear (legacy alias) |
 | `↑` / `↓` | browse input history (per-session, in-memory) |
+
+## Tool details
+
+Tool calls and results keep their **complete** text (pretty-printed arguments,
+full result payload) — nothing is truncated. What you see depends on the
+`/tools` mode:
+
+| Mode | Tool call | Tool result |
+|------|-----------|-------------|
+| `on` (default) | tool name + one-line compact arguments | first line of the result |
+| `full` | full pretty-printed arguments | entire result payload |
+| `off` | tool name only | `…` |
+
+When a summary hides content, a dim `… N more lines — Ctrl+O expands` hint
+shows under the entry. `Ctrl+O` (pi-style) toggles between `on` and `full`;
+bare `/tools` cycles `off → on → full`. Failed tool results stay visible in
+`error` style in every mode — `full` only expands their payload.
 
 ## Images
 

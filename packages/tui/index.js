@@ -6,8 +6,8 @@
 // compose the pi-embed profile (base + prompt + fff + tools) in-process,
 // create an Agent directly, and render its session events live.
 //
-// Commands: /help /clear /theme (picker) /tools [on|off] /new /quit
-// Shortcuts: Ctrl+N new session · Ctrl+T theme · Ctrl+K clear · Ctrl+Q quit
+// Commands: /help /clear /theme (picker) /tools [on|off|full] /new /quit
+// Shortcuts: Ctrl+N new session · Ctrl+T theme · Ctrl+O tool output expand · Ctrl+K clear · Ctrl+Q quit
 // Env: DSH_BIN unused here; DSH_PI_PROVIDER/DSH_PI_MODEL override the route.
 import { spawnSync } from 'node:child_process'
 import { Buffer } from 'node:buffer'
@@ -280,6 +280,68 @@ function contentText(content) {
   return s
 }
 
+// ---- tool detail helpers -----------------------------------------------------
+// Tool calls/results used to be truncated at 140 chars when the message was
+// stored, so the detail was lost forever. Both live render and history rebuild
+// go through these helpers instead: FULL text is kept on the message and a
+// first-line summary drives the collapsed view (/tools on) — /tools full or
+// Ctrl+O expand to the complete text.
+const TOOL_SUMMARY_CAP = 300 // summary lines longer than this get an ellipsis
+const TOOLS_MODE_LABEL = { on: 'summary', full: 'full', off: 'off' } // status labels for /tools
+
+// tool/call -> { text, summary }. text = name + pretty-printed (multi-line)
+// arguments; summary = name + compact one-line args.
+function toolCallInfo(d) {
+  const name = d.name || 'tool'
+  const raw = d.arguments ?? ''
+  let pretty = ''
+  let compact = ''
+  try {
+    const parsed = JSON.parse(raw)
+    pretty = JSON.stringify(parsed, null, 2)
+    compact = JSON.stringify(parsed)
+  } catch {
+    pretty = String(raw)
+    compact = String(raw)
+  }
+  const argSummary = compact.length > TOOL_SUMMARY_CAP ? compact.slice(0, TOOL_SUMMARY_CAP) + '…' : compact
+  return {
+    text: pretty ? `${name}\n${pretty}` : name,
+    summary: `${name}${argSummary ? '  ' + argSummary : ''}`,
+  }
+}
+
+// tool/result -> { kind, text, summary } | null. Success renders as a 'result'
+// message (full payload text + first-line summary); failures render as an
+// 'error' message (tool name + message + dim failure code) with the same shape
+// so /tools full can expand either. `names` maps callId -> tool name for
+// correlating errors.
+function toolResultMessage(d, names) {
+  const content = d.message?.content || []
+  const txt = contentText(content)
+  const first = content[0]
+  const failed = !!(d.error || first?.isError)
+  if (failed) {
+    const name = names?.get(d.callId) || 'tool'
+    const code = d.error ? `${d.error.name}${d.error.code ? ` (${d.error.code})` : ''}` : ''
+    const head = txt.split('\n')[0].trim() || 'no message'
+    const headLine = head.length > TOOL_SUMMARY_CAP ? head.slice(0, TOOL_SUMMARY_CAP) + '…' : head
+    const codeLine = code ? `\n  \x1b[90m${code}\x1b[0m` : ''
+    return {
+      kind: 'error',
+      text: `${name}: ${txt.trim() || 'no message'}${codeLine}`,
+      summary: `${name}: ${headLine}${codeLine}`,
+    }
+  }
+  if (!txt) return null
+  const firstLine = txt.split('\n')[0].trim() || '…'
+  return {
+    kind: 'result',
+    text: txt,
+    summary: firstLine.length > TOOL_SUMMARY_CAP ? firstLine.slice(0, TOOL_SUMMARY_CAP) + '…' : firstLine,
+  }
+}
+
 // ---- sessions --------------------------------------------------------------------
 
 // dsh's project-key normalization for the on-disk sessions root: separators ->
@@ -353,7 +415,7 @@ function setupUi(runtimeRef, modelInfo) {
   let theme = THEMES[process.env.DSH_PI_THEME] || THEMES.default
   // model/session info is always visible in the status line
   const runtimeInfo = { provider: modelInfo?.provider || '', model: modelInfo?.model || '' }
-  let showTools = true
+  let toolsMode = 'on' // /tools state: on (summaries) | full (everything) | off (folded)
   const messages = []
   const toolNames = new Map() // callId -> tool name, for correlating error results
   let currentAsst = null
@@ -384,7 +446,7 @@ function setupUi(runtimeRef, modelInfo) {
       { name: 'help', description: 'show help' },
       { name: 'clear', description: 'clear the conversation view' },
       { name: 'theme', description: 'switch theme (picker)', argumentHint: '<name>', getArgumentCompletions: () => Object.keys(THEMES).map((n) => ({ value: n, label: n })) },
-      { name: 'tools', description: 'fold/unfold tool details', argumentHint: '[on|off]' },
+      { name: 'tools', description: 'fold/unfold/expand tool details', argumentHint: '[on|off|full]', getArgumentCompletions: () => ['on', 'off', 'full'].map((v) => ({ value: v, label: v })) },
       { name: 'sessions', description: 'pick, switch or delete sessions', argumentHint: '[<n>|delete <n>]' },
       { name: 'fork', description: 'branch a child session from this one' },
       { name: 'new', description: 'start a fresh session' },
@@ -403,6 +465,7 @@ function setupUi(runtimeRef, modelInfo) {
       ...TUI_KEYBINDINGS,
       'app.session.new': { defaultKeys: 'ctrl+n', description: 'Start a fresh session' },
       'app.theme.next': { defaultKeys: 'ctrl+t', description: 'Switch theme' },
+      'app.tools.expand': { defaultKeys: 'ctrl+o', description: 'Toggle tool output expansion' },
       'app.clear': { defaultKeys: ['ctrl+k', 'ctrl+l'], description: 'Clear the conversation view' },
       'app.quit': { defaultKeys: 'ctrl+q', description: 'Quit' },
     }),
@@ -446,28 +509,23 @@ function setupUi(runtimeRef, modelInfo) {
     refreshStatus()
   }
 
-  function addMessage(kind, text) {
+  // render one stored message per the current /tools mode — shared by live
+  // addMessage and rebuild() so folding is consistent mid-turn and after /tools
+  function renderText(m, t) {
+    if (m.kind === 'tool') return toolRender(m, t)
+    if (m.kind === 'result') return resultRender(m, t)
+    if (m.kind === 'error') return errorRender(m, t)
+    if (m.kind === 'user') return t.user(m.text)
+    if (m.kind === 'help') return m.text // already styled by the help builder
+    if (m.kind === 'logo') return t.logo(m.text)
+    return t.sys(m.text)
+  }
+  function addMessage(kind, text, opts = {}) {
     const t = theme
-    const comp =
-      kind === 'asst'
-        ? new Markdown(text, 1, 0, t.markdown, {})
-        : new Text(
-            kind === 'user'
-              ? t.user(text)
-              : kind === 'tool'
-                ? t.tool(text)
-                : kind === 'result'
-                  ? t.result(text)
-                  : kind === 'error'
-                    ? t.error(text)
-                    : kind === 'help'
-                      ? text // already styled by the help builder
-                      : kind === 'logo'
-                        ? t.logo(text)
-                        : t.sys(text),
-          )
-    messages.push({ kind, text, comp })
-    container.addChild(comp)
+    const m = { kind, text, summary: opts.summary }
+    m.comp = kind === 'asst' ? new Markdown(m.text, 1, 0, t.markdown, {}) : new Text(renderText(m, t))
+    messages.push(m)
+    container.addChild(m.comp)
     tui.requestRender()
   }
 
@@ -477,7 +535,7 @@ function setupUi(runtimeRef, modelInfo) {
       filename: opts.name,
     })
     messages.push({ kind: 'image', base64, mimeType, name: opts.name, fromTool: !!opts.fromTool, comp })
-    if (opts.fromTool && !showTools) return // folded with tool details — mounted by rebuild() on unfold
+    if (opts.fromTool && toolsMode === 'off') return // folded with tool details — mounted by rebuild() on unfold
     container.addChild(new Spacer(1))
     container.addChild(comp)
     tui.requestRender()
@@ -522,23 +580,38 @@ function setupUi(runtimeRef, modelInfo) {
       })
   }
 
+  // per-kind render for the current /tools mode. The dim hint mirrors pi's
+  // "... N more lines (Ctrl+O to expand)" affordance so collapsed entries stay
+  // discoverable.
+  const dimHint = (lines) =>
+    lines > 0 ? `\n  \x1b[90m… ${lines} more line${lines === 1 ? '' : 's'} — Ctrl+O expands\x1b[0m` : ''
+  function toolRender(m, t) {
+    if (toolsMode === 'off') return t.tool(m.text.split('\n')[0]) // tool name only
+    if (toolsMode === 'full') return t.tool(m.text)
+    return t.tool(m.summary || m.text) + dimHint(m.text.split('\n').length - 1)
+  }
+  function resultRender(m, t) {
+    if (toolsMode === 'off') return t.sys('…')
+    if (toolsMode === 'full') return t.result(m.text)
+    return t.result(m.summary || m.text) + dimHint(m.text.split('\n').length - 1)
+  }
+  function errorRender(m, t) {
+    // failures stay visible in every mode; full expands their full payload
+    if (toolsMode === 'full' && m.summary) return t.error(m.text)
+    return t.error(m.summary || m.text)
+  }
+
   function rebuild() {
     container.clear()
     for (const m of messages) {
       const t = theme
       if (m.kind === 'asst') m.comp = new Markdown(m.text, 1, 0, t.markdown, {})
-      else if (m.kind === 'user') m.comp = new Text(t.user(m.text))
-      else if (m.kind === 'tool') m.comp = new Text(showTools ? t.tool(m.text) : t.tool(m.text.split('\n')[0]))
-      else if (m.kind === 'result') m.comp = new Text(showTools ? t.result(m.text) : t.sys('…'))
-      else if (m.kind === 'error') m.comp = new Text(t.error(m.text))
-      else if (m.kind === 'help') m.comp = new Text(m.text)
-      else if (m.kind === 'logo') m.comp = new Text(t.logo(m.text))
       else if (m.kind === 'image') {
-        if (m.fromTool && !showTools) continue // folded with tool details
+        if (m.fromTool && toolsMode === 'off') continue // folded with tool details
         container.addChild(new Spacer(1))
         m.comp = new Image(m.base64, m.mimeType, IMAGE_THEME, { maxWidthCells: IMAGE_MAX_WIDTH_CELLS, filename: m.name })
       }
-      else m.comp = new Text(t.sys(m.text))
+      else m.comp = new Text(renderText(m, t))
       container.addChild(m.comp)
     }
     tui.requestRender()
@@ -630,24 +703,13 @@ function setupUi(runtimeRef, modelInfo) {
         tui.requestRender()
       }
       toolNames.set(d.callId, d.name)
-      let a = d.arguments || ''
-      try { a = JSON.stringify(JSON.parse(a)).slice(0, 140) } catch { a = String(a).slice(0, 140) }
-      addMessage('tool', `${d.name}\n  ${a}\n`)
+      const info = toolCallInfo(d)
+      addMessage('tool', info.text, { summary: info.summary })
     } else if (event.type === 'tool/result') {
       // tool results nest their payload inside a tool-result block — walk it
-      const content = d.message?.content || []
-      const txt = contentText(content)
-      const first = content[0]
-      const failed = !!(d.error || first?.isError)
-      if (failed) {
-        const name = toolNames.get(d.callId) || 'tool'
-        const head = (txt.split('\n')[0].trim() || 'no message').slice(0, 140)
-        const code = d.error ? `${d.error.name}${d.error.code ? ` (${d.error.code})` : ''}` : ''
-        addMessage('error', `${name}: ${head}${code ? `\n  \x1b[90m${code}\x1b[0m` : ''}`)
-      } else if (txt) {
-        addMessage('result', txt.split('\n')[0].slice(0, 140))
-      }
-      for (const b of collectImageBlocks(content)) addImageFromBlock(b, true)
+      const r = toolResultMessage(d, toolNames)
+      if (r) addMessage(r.kind, r.text, { summary: r.summary })
+      for (const b of collectImageBlocks(d.message?.content || [])) addImageFromBlock(b, true)
     }
   }
 
@@ -663,7 +725,7 @@ function setupUi(runtimeRef, modelInfo) {
       cmdRow('/help', 'this help'),
       cmdRow('/clear', 'clear the conversation view (session stays)'),
       cmdRow('/theme [name]', `switch theme from a list (${themeNames.join(', ')})`),
-      cmdRow('/tools [on|off]', 'fold/unfold tool-call details'),
+      cmdRow('/tools [on|off|full]', 'tool details: on = first-line summaries, full = everything, off = folded'),
       cmdRow('/sessions', 'pick a session from the tree (d = delete, Esc = cancel)'),
       cmdRow('/sessions <n>', 'switch to session #n'),
       cmdRow('/sessions delete <n>', 'delete session #n (never the current one)'),
@@ -674,6 +736,7 @@ function setupUi(runtimeRef, modelInfo) {
       t.header('keys'),
       keyRow('Ctrl+N', 'new session'),
       keyRow('Ctrl+T', `switch theme (cycles: ${themeNames.join(' -> ')})`),
+      keyRow('Ctrl+O', 'toggle tool output expansion (on <-> full)'),
       keyRow('Ctrl+K', 'clear the conversation view'),
       keyRow('Ctrl+Q', 'quit'),
       keyRow('Ctrl+L', 'clear (alias of Ctrl+K)'),
@@ -684,6 +747,19 @@ function setupUi(runtimeRef, modelInfo) {
 
   function clearView() {
     cancelAsst(); renderedImages.clear(); messages.length = 0; currentAsst = null; asstText = ''; rebuild()
+  }
+  // transient notice: keep the spinner running if a turn is in flight
+  function flashStatus(str) {
+    if (busy) {
+      statusLoader.setMessage(composeStatus(str))
+      tui.requestRender()
+    } else setStatus(str)
+  }
+  function toggleToolsExpand() {
+    // pi-style Ctrl+O: expand/collapse tool output (on <-> full)
+    toolsMode = toolsMode === 'full' ? 'on' : 'full'
+    rebuild()
+    flashStatus(`tool output: ${TOOLS_MODE_LABEL[toolsMode]}`)
   }
   function cycleTheme() {
     const names = Object.keys(THEMES)
@@ -791,6 +867,10 @@ function setupUi(runtimeRef, modelInfo) {
     tui.setFocus(confirm)
   }
 
+  function restoreMessage(m) {
+    if (m.kind === 'image') addImageMessage(m.base64, m.mimeType, { name: m.name, fromTool: m.fromTool })
+    else addMessage(m.kind, m.text, { summary: m.summary })
+  }
   function switchToPick(list, n) {
     const pick = buildSessionTree(list)[n - 1]?.node
     if (!pick) { addMessage('sys', 'no session #' + n); return }
@@ -802,10 +882,8 @@ function setupUi(runtimeRef, modelInfo) {
       messages.length = 0
       currentAsst = null
       asstText = ''
-      for (const m of await runtimeRef.conversationHistory(r.agent)) {
-        if (m.kind === 'image') addImageMessage(m.base64, m.mimeType, { name: m.name, fromTool: m.fromTool })
-        else addMessage(m.kind, m.text)
-      }
+      rebuild() // unmount the old session's view before restoring the new one
+      for (const m of await runtimeRef.conversationHistory(r.agent)) restoreMessage(m)
       addMessage('sys', 'switched to: ' + pick.title)
       setStatus('ready')
     }).catch((e) => {
@@ -873,10 +951,12 @@ function setupUi(runtimeRef, modelInfo) {
         return true
       }
       case '/tools':
-        if (arg === 'off') showTools = false
-        else if (arg === 'on') showTools = true
-        else showTools = !showTools
-        rebuild(); addMessage('sys', `tool details: ${showTools ? 'on' : 'off'}`)
+        if (arg === 'off') toolsMode = 'off'
+        else if (arg === 'on') toolsMode = 'on'
+        else if (arg === 'full') toolsMode = 'full'
+        else toolsMode = toolsMode === 'off' ? 'on' : toolsMode === 'on' ? 'full' : 'off' // bare /tools cycles
+        rebuild(); addMessage('sys', `tool details: ${TOOLS_MODE_LABEL[toolsMode]}`)
+        flashStatus(`tool output: ${TOOLS_MODE_LABEL[toolsMode]}`)
         return true
       case '/sessions': {
         const del = String(arg || '').match(/^delete\s+(\d+)$/i)
@@ -899,10 +979,8 @@ function setupUi(runtimeRef, modelInfo) {
           messages.length = 0
           currentAsst = null
           asstText = ''
-          for (const m of await runtimeRef.conversationHistory(r.agent)) {
-            if (m.kind === 'image') addImageMessage(m.base64, m.mimeType, { name: m.name, fromTool: m.fromTool })
-            else addMessage(m.kind, m.text)
-          }
+          rebuild() // unmount the parent session's view before restoring the child's
+          for (const m of await runtimeRef.conversationHistory(r.agent)) restoreMessage(m)
           addMessage('sys', `forked — child session, shared ${r.seedLength} events`)
           setStatus('ready')
         }).catch((e) => {
@@ -957,6 +1035,7 @@ function setupUi(runtimeRef, modelInfo) {
     const kb = getKeybindings()
     if (kb.matches(data, 'app.session.new')) { runCommand('/new'); return { consume: true } }
     if (kb.matches(data, 'app.theme.next')) { cycleTheme(); return { consume: true } }
+    if (kb.matches(data, 'app.tools.expand')) { toggleToolsExpand(); return { consume: true } }
     if (kb.matches(data, 'app.clear')) { clearView(); return { consume: true } }
     if (kb.matches(data, 'app.quit')) { shutdown(); return { consume: true } }
     // session picker: d/x deletes the selected session (confirmation follows)
@@ -1171,6 +1250,7 @@ async function main() {
       },
       async conversationHistory(agentObj) {
         const msgs = []
+        const names = new Map() // callId -> tool name, for correlating error results
         const imageOf = async (b, fromTool) => {
           if (b.data && b.mimeType) return { kind: 'image', base64: b.data, mimeType: b.mimeType, name: b.name, fromTool }
           if (typeof b.url === 'string' && b.url.startsWith('data:')) {
@@ -1195,7 +1275,15 @@ async function main() {
             const txt = contentText(content)
             if (txt) msgs.push({ kind: 'asst', text: txt })
             for (const b of collectImageBlocks(content)) msgs.push(await imageOf(b, false))
+          } else if (e.type === 'tool/call') {
+            // restore the full call (same shape as live render) so /tools full
+            // still works after a session switch / fork
+            names.set(e.data?.callId, e.data?.name)
+            const info = toolCallInfo(e.data || {})
+            msgs.push({ kind: 'tool', text: info.text, summary: info.summary })
           } else if (e.type === 'tool/result') {
+            const r = toolResultMessage(e.data || {}, names)
+            if (r) msgs.push({ kind: r.kind, text: r.text, summary: r.summary })
             for (const b of collectImageBlocks(e.data.message?.content || [])) msgs.push(await imageOf(b, true))
           }
         }
@@ -1249,4 +1337,4 @@ if (process.env.DSH_PI_TUI_TEST !== '1') {
 }
 
 // pure content-block helpers, exported for tests (DSH_PI_TUI_TEST=1 skips main)
-export { collectImageBlocks, contentText }
+export { collectImageBlocks, contentText, toolCallInfo, toolResultMessage }
