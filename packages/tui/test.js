@@ -6,7 +6,7 @@
 // and each message carries a first-line summary for the collapsed /tools on
 // view. Also covers the nested content walkers used by image rendering and
 // history rebuilds.
-import { collectImageBlocks, contentText, reasoningBlocks, reasoningSummary, toolCallInfo, toolResultMessage, cycleModelSelection, resolveModelArg } from './index.js'
+import { collectImageBlocks, contentText, reasoningBlocks, reasoningSummary, toolCallInfo, toolResultMessage, cycleModelSelection, resolveModelArg, recentSessions } from './index.js'
 
 let failed = 0
 function check(name, cond, detail) {
@@ -136,6 +136,22 @@ check('resolve bare model id (unique across providers)', eq(resolveModelArg(MODE
 check('resolve bare model id unique', eq(resolveModelArg([MODELS[0], MODELS[1]], 'deepseek-v4-pro'), MODELS[1]), resolveModelArg([MODELS[0], MODELS[1]], 'deepseek-v4-pro'))
 check('resolve unknown model is undefined', resolveModelArg(MODELS, 'gpt-99') === undefined)
 check('resolve unknown provider is undefined', resolveModelArg(MODELS, 'nope/deepseek-v4-flash') === undefined)
+
+// ---- session resume (/resume) -------------------------------------------------
+
+const SESSIONS = [
+  { id: 's-old', title: 'old', createdAt: 100, current: false },
+  { id: 's-cur', title: 'current', createdAt: 300, current: true },
+  { id: 's-mid', title: 'mid', createdAt: 200, current: false },
+  { id: 's-new', title: 'new', createdAt: 400, current: false },
+]
+
+check('recentSessions excludes the current session', eq(recentSessions(SESSIONS, 10).map((s) => s.id).join(','), 's-new,s-mid,s-old'), recentSessions(SESSIONS, 10))
+check('recentSessions newest-first', eq(recentSessions(SESSIONS, 10)[0].id, 's-new'), recentSessions(SESSIONS, 10))
+check('recentSessions caps at n', eq(recentSessions(SESSIONS, 2).length, 2), recentSessions(SESSIONS, 2))
+check('recentSessions defensive sort (unsorted input)', eq(recentSessions([SESSIONS[2], SESSIONS[3], SESSIONS[1], SESSIONS[0]], 10).map((s) => s.id).join(','), 's-new,s-mid,s-old'), recentSessions([SESSIONS[2], SESSIONS[3], SESSIONS[1], SESSIONS[0]], 10))
+check('recentSessions empty when only current', eq(recentSessions([SESSIONS[1]], 10).length, 0), recentSessions([SESSIONS[1]], 10))
+check('recentSessions does not mutate input', eq(SESSIONS.length, 4), SESSIONS)
 
 console.log(failed ? `\n${failed} failure(s)` : '\nall tests passed')
 process.exit(failed ? 1 : 0)
