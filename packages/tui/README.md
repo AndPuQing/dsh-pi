@@ -19,6 +19,8 @@ Controls: type a prompt and Enter; `exit` / `/quit` / Ctrl-C to leave.
 | `/help` | show help |
 | `/clear` | clear the conversation view (session stays) |
 | `/theme <name>` | switch theme (`default`, `light`) |
+| `/model` | open the model picker (all registered providers/models; select to switch) |
+| `/model <provider>/<model>` | switch model directly (a bare model id works when it resolves to exactly one provider) |
 | `/tools [on|off|full]` | tool details: `on` = first-line summaries (default), `full` = complete output, `off` = folded (bare `/tools` cycles) |
 | `/sessions` | open the session picker (tree view — select to switch, `d`/`x` deletes with confirmation, `Esc` cancels) |
 | `/sessions <n>` | switch to session #n (tree order) |
@@ -37,6 +39,7 @@ Shortcuts (registered via pi-tui `KeybindingsManager`, ids mirror pi's `app.*` d
 | `Esc` | interrupt the running turn (no-op when idle) |
 | `Ctrl+N` | new session |
 | `Ctrl+T` | expand/collapse reasoning (thinking); `/theme` switches themes |
+| `Ctrl+P` | cycle to the next model (`Shift+Ctrl+P` = previous); `/model` picks from a list |
 | `Ctrl+O` | toggle tool output expansion (`on` <-> `full`) |
 | `Ctrl+K` | clear the conversation view (shadows the editor's kill-to-line-end) |
 | `Ctrl+Q` | quit |
@@ -84,6 +87,19 @@ fetched from the TUI — they show as `[image: <url>]`.
 Images from tool results fold with `/tools off`; image rendering survives
 `/clear` and session switches (images are rebuilt from the session log).
 
+## Models
+
+The model route is fixed at startup unless you switch it in-session: `/model`
+opens a picker over every registered provider route and their models (from the
+same `ctx.llm` catalog the web Models page uses), and `Ctrl+P` / `Shift+Ctrl+P`
+cycle forward/backward through that list (pi's `app.model.cycleForward` /
+`cycleBackward` semantics). The switch applies to the **next** prompt of the
+current session and to every new/restored session — new agents are created and
+resumed with the new `provider`/`model`, and the status line updates
+immediately. The selection is persisted to `agent-default-model` in
+`$DSH_HOME/settings.yaml` (best-effort; without a settings provider it stays
+in-memory), so the next TUI run starts on the last model you chose.
+
 ## Errors & help
 
 Tool failures and model/provider errors render as red `✗` blocks (with a dim
@@ -93,7 +109,7 @@ aligned command/key reference.
 
 ## Env
 
-- `DSH_PI_PROVIDER` / `DSH_PI_MODEL` — override the model route (default: `agent-default-model` from `$DSH_HOME/settings.yaml`, else `opencode-go` / `deepseek-v4-flash`)
+- `DSH_PI_PROVIDER` / `DSH_PI_MODEL` — override the model route (default: `agent-default-model` from `$DSH_HOME/settings.yaml`, else `opencode-go` / `deepseek-v4-flash`); in-session `/model` / `Ctrl+P` switches override this for the rest of the run and persist to `settings.yaml`
 - `DSH_HOME` — harness home (default `~/.dsh`)
 
 ## Roadmap

@@ -6,8 +6,8 @@
 // compose the pi-embed profile (base + prompt + fff + tools) in-process,
 // create an Agent directly, and render its session events live.
 //
-// Commands: /help /clear /theme (picker) /tools [on|off|full] /new /stop /quit
-// Shortcuts: Esc interrupt · Ctrl+N new session · Ctrl+T reasoning expand/collapse · Ctrl+O tool output expand · Ctrl+K clear · Ctrl+Q quit
+// Commands: /help /clear /theme (picker) /tools [on|off|full] /model (picker) /new /stop /quit
+// Shortcuts: Esc interrupt · Ctrl+N new session · Ctrl+T reasoning expand/collapse · Ctrl+P / Shift+Ctrl+P cycle model · Ctrl+O tool output expand · Ctrl+K clear · Ctrl+Q quit
 // Env: DSH_BIN unused here; DSH_PI_PROVIDER/DSH_PI_MODEL override the route.
 import { spawnSync } from 'node:child_process'
 import { Buffer } from 'node:buffer'
@@ -485,6 +485,7 @@ function setupUi(runtimeRef, modelInfo) {
       { name: 'clear', description: 'clear the conversation view' },
       { name: 'theme', description: 'switch theme (picker)', argumentHint: '<name>', getArgumentCompletions: () => Object.keys(THEMES).map((n) => ({ value: n, label: n })) },
       { name: 'tools', description: 'fold/unfold/expand tool details', argumentHint: '[on|off|full]', getArgumentCompletions: () => ['on', 'off', 'full'].map((v) => ({ value: v, label: v })) },
+      { name: 'model', description: 'switch model (picker)', argumentHint: '[<provider>/<model>]' },
       { name: 'sessions', description: 'pick, switch or delete sessions', argumentHint: '[<n>|delete <n>]' },
       { name: 'fork', description: 'branch a child session from this one' },
       { name: 'new', description: 'start a fresh session' },
@@ -505,6 +506,8 @@ function setupUi(runtimeRef, modelInfo) {
       'app.interrupt': { defaultKeys: 'escape', description: 'Interrupt the running turn' },
       'app.session.new': { defaultKeys: 'ctrl+n', description: 'Start a fresh session' },
       'app.reasoning.toggle': { defaultKeys: 'ctrl+t', description: 'Expand/collapse reasoning (thinking)' },
+      'app.model.cycleForward': { defaultKeys: 'ctrl+p', description: 'Cycle to next model' },
+      'app.model.cycleBackward': { defaultKeys: 'shift+ctrl+p', description: 'Cycle to previous model' },
       'app.tools.expand': { defaultKeys: 'ctrl+o', description: 'Toggle tool output expansion' },
       'app.clear': { defaultKeys: ['ctrl+k', 'ctrl+l'], description: 'Clear the conversation view' },
       'app.quit': { defaultKeys: 'ctrl+q', description: 'Quit' },
@@ -855,6 +858,7 @@ function setupUi(runtimeRef, modelInfo) {
       cmdRow('/help', 'this help'),
       cmdRow('/clear', 'clear the conversation view (session stays)'),
       cmdRow('/theme [name]', `switch theme from a list (${themeNames.join(', ')})`),
+      cmdRow('/model [provider/model]', 'switch model from a list (Ctrl+P / Shift+Ctrl+P cycle)'),
       cmdRow('/tools [on|off|full]', 'tool details: on = first-line summaries, full = everything, off = folded'),
       cmdRow('/sessions', 'pick a session from the tree (d = delete, Esc = cancel)'),
       cmdRow('/sessions <n>', 'switch to session #n'),
@@ -868,6 +872,7 @@ function setupUi(runtimeRef, modelInfo) {
       keyRow('Esc', 'interrupt the running turn'),
       keyRow('Ctrl+N', 'new session'),
       keyRow('Ctrl+T', 'expand/collapse reasoning (thinking)'),
+      keyRow('Ctrl+P', 'next model (Shift+Ctrl+P = previous)'),
       keyRow('Ctrl+O', 'toggle tool output expansion (on <-> full)'),
       keyRow('Ctrl+K', 'clear the conversation view'),
       keyRow('Ctrl+Q', 'quit'),
@@ -892,6 +897,56 @@ function setupUi(runtimeRef, modelInfo) {
     toolsMode = toolsMode === 'full' ? 'on' : 'full'
     rebuild()
     flashStatus(`tool output: ${TOOLS_MODE_LABEL[toolsMode]}`)
+  }
+  // ---- in-session model switching -------------------------------------------
+  // The runtime owns the live selection (the mutable object handed to
+  // installModelSelection); the UI only drives it: /model picker + Ctrl+P /
+  // Shift+Ctrl+P cycling (pi's app.model.cycleForward/cycleBackward semantics).
+  function applyModel(provider, model) {
+    if (!runtimeRef.setModel) { addMessage('sys', 'runtime not ready'); return }
+    flashStatus('… switching model…')
+    runtimeRef.setModel(provider, model)
+      .then(() => {
+        setModelInfo(provider, model)
+        if (!busy) setStatus('ready')
+        addMessage('sys', `model: ${provider}/${model}`)
+      })
+      .catch((e) => {
+        addMessage('error', `model: ${e.message}`)
+        if (!busy) setStatus('ready')
+      })
+  }
+  function cycleModel(direction) {
+    if (!runtimeRef.listModels) { addMessage('sys', 'runtime not ready'); return }
+    runtimeRef.listModels().then((models) => {
+      const next = cycleModelSelection(models, runtimeInfo.provider, runtimeInfo.model, direction)
+      if (!next) { flashStatus('only one model'); return }
+      applyModel(next.provider, next.model)
+    }).catch((e) => addMessage('error', `model list: ${e.message}`))
+  }
+  function openModelPicker() {
+    if (!runtimeRef.listModels) { addMessage('sys', 'runtime not ready'); return }
+    runtimeRef.listModels().then((models) => {
+      if (!models.length) { addMessage('sys', 'no models available'); return }
+      const items = models.map((m) => ({
+        label: `${m.provider} / ${m.model}${m.provider === runtimeInfo.provider && m.model === runtimeInfo.model ? ' (current)' : ''}`,
+        value: `${m.provider}/${m.model}`,
+        description: m.providerName && m.providerName !== m.provider ? m.providerName : '',
+      }))
+      const sel = new SelectList(items, 10, pickerTheme)
+      sel.onSelect = (item) => {
+        tui.hideOverlay()
+        tui.setFocus(editor)
+        const sl = item.value.indexOf('/')
+        applyModel(item.value.slice(0, sl), item.value.slice(sl + 1))
+      }
+      sel.onCancel = () => {
+        tui.hideOverlay()
+        tui.setFocus(editor)
+      }
+      tui.showOverlay(sel)
+      tui.setFocus(sel)
+    }).catch((e) => addMessage('error', `model list: ${e.message}`))
   }
   // Escape / /stop: abort the running turn via the dsh agent's cancel. The
   // cause flows into the turn/end reason ({ kind: 'aborted', reason: { kind:
@@ -1106,6 +1161,23 @@ function setupUi(runtimeRef, modelInfo) {
         rebuild(); addMessage('sys', `tool details: ${TOOLS_MODE_LABEL[toolsMode]}`)
         flashStatus(`tool output: ${TOOLS_MODE_LABEL[toolsMode]}`)
         return true
+      case '/model': {
+        if (arg) {
+          // /model provider/model — or a bare model id resolved across providers
+          const sl = arg.indexOf('/')
+          if (sl !== -1) { applyModel(arg.slice(0, sl), arg.slice(sl + 1)); return true }
+          if (!runtimeRef.listModels) { addMessage('sys', 'runtime not ready'); return true }
+          runtimeRef.listModels().then((models) => {
+            const hit = resolveModelArg(models, arg)
+            if (hit) { applyModel(hit.provider, hit.model); return }
+            if (models.some((x) => x.model === arg)) addMessage('sys', `ambiguous model '${arg}' — try /model <provider>/<model>`)
+            else addMessage('sys', `unknown model '${arg}' — /model for the picker`)
+          }).catch((e) => addMessage('error', `model list: ${e.message}`))
+          return true
+        }
+        openModelPicker()
+        return true
+      }
       case '/sessions': {
         const del = String(arg || '').match(/^delete\s+(\d+)$/i)
         const n = Number(arg)
@@ -1190,6 +1262,8 @@ function setupUi(runtimeRef, modelInfo) {
     const kb = getKeybindings()
     if (kb.matches(data, 'app.session.new')) { runCommand('/new'); return { consume: true } }
     if (kb.matches(data, 'app.reasoning.toggle')) { toggleReasoning(); return { consume: true } }
+    if (kb.matches(data, 'app.model.cycleForward')) { cycleModel('forward'); return { consume: true } }
+    if (kb.matches(data, 'app.model.cycleBackward')) { cycleModel('backward'); return { consume: true } }
     if (kb.matches(data, 'app.tools.expand')) { toggleToolsExpand(); return { consume: true } }
     if (kb.matches(data, 'app.clear')) { clearView(); return { consume: true } }
     if (kb.matches(data, 'app.quit')) { shutdown(); return { consume: true } }
@@ -1420,6 +1494,34 @@ async function main() {
         runtimeRef.sessionSwitched?.()
         return { agent }
       },
+      async listModels() {
+        // every registered provider route, flat: { provider, model, name, providerName }
+        const llm = ctx.get('llm')
+        if (!llm?.listModels) return [{ provider: selection.provider, model: selection.model, name: selection.model, providerName: selection.provider }]
+        const out = []
+        for (const p of llm.listProviders()) {
+          try {
+            for (const m of await llm.listModels(p.id)) {
+              out.push({ provider: p.id, model: m.id, name: m.name || m.id, providerName: p.name || p.id })
+            }
+          } catch { /* a provider that cannot enumerate models is skipped */ }
+        }
+        return out
+      },
+      async setModel(provider, model) {
+        // mutate the live selection object the agent model-selection listeners
+        // read at prompt-assembly time — the switch lands on the next turn
+        selection.provider = provider
+        selection.model = model
+        try {
+          await defaultModel.saveSelection({
+            provider,
+            model,
+            ...(selection.reasoningEffort === undefined ? {} : { reasoningEffort: selection.reasoningEffort }),
+          })
+        } catch { /* no settings provider — in-memory selection only */ }
+        return { provider, model, reasoningEffort: selection.reasoningEffort }
+      },
       async conversationHistory(agentObj) {
         const msgs = []
         const names = new Map() // callId -> tool name, for correlating error results
@@ -1471,7 +1573,7 @@ async function main() {
   }
 
   // UI first: instant; boot the runtime in the background
-  const runtimeRef = { ready: false, sessionId: null, prompt: null, interrupt: null, newSession: null, listSessions: null, switchSession: null, deleteSession: null, forkSession: null, currentTitle: null, conversationHistory: null, readImage: null, dispose: null, onEvent: null, refreshStatus: null, sessionSwitched: null }
+  const runtimeRef = { ready: false, sessionId: null, prompt: null, interrupt: null, newSession: null, listSessions: null, switchSession: null, deleteSession: null, forkSession: null, currentTitle: null, conversationHistory: null, readImage: null, dispose: null, onEvent: null, refreshStatus: null, sessionSwitched: null, setModel: null, listModels: null }
   const ui = setupUi(runtimeRef, { provider, model })
   runtimeRef.refreshStatus = () => ui.refreshStatus()
   // a switched agent invalidates the old turn's busy state — settle on ready
@@ -1492,6 +1594,8 @@ async function main() {
       runtimeRef.conversationHistory = runtime.conversationHistory
       runtimeRef.readImage = runtime.readImage
       runtimeRef.dispose = runtime.dispose
+      runtimeRef.setModel = runtime.setModel
+      runtimeRef.listModels = runtime.listModels
       runtimeRef.sessionId = runtime.sessionId
       runtime.onEvent((session, event) => ui.renderEvent(session, event))
       saveSessionId(runtime.sessionId)
@@ -1512,4 +1616,34 @@ if (process.env.DSH_PI_TUI_TEST !== '1') {
 }
 
 // pure content-block helpers, exported for tests (DSH_PI_TUI_TEST=1 skips main)
-export { collectImageBlocks, contentText, reasoningBlocks, reasoningSummary, toolCallInfo, toolResultMessage }
+
+// ---- model switching helpers (pure, exported for tests) ----------------------
+
+// Next entry in a flat { provider, model } list relative to the current pair.
+// Returns undefined when the list has ≤1 entry or the current pair is not in
+// it (the UI treats that as "only one model" / nothing to cycle).
+function cycleModelSelection(models, provider, model, direction) {
+  if (models.length <= 1) return undefined
+  const idx = models.findIndex((m) => m.provider === provider && m.model === model)
+  if (idx === -1) return undefined
+  const next = direction === 'forward'
+    ? (idx + 1) % models.length
+    : (idx - 1 + models.length) % models.length
+  return models[next]
+}
+
+// Resolve a /model argument against the flat list: 'provider/model' always
+// resolves; a bare model id resolves only when exactly one provider offers it
+// (ambiguity or unknown -> undefined, reported by the caller).
+function resolveModelArg(models, arg) {
+  const sl = arg.indexOf('/')
+  if (sl !== -1) {
+    const provider = arg.slice(0, sl)
+    const model = arg.slice(sl + 1)
+    return models.find((m) => m.provider === provider && m.model === model)
+  }
+  const matches = models.filter((m) => m.model === arg)
+  return matches.length === 1 ? matches[0] : undefined
+}
+
+export { collectImageBlocks, contentText, reasoningBlocks, reasoningSummary, toolCallInfo, toolResultMessage, cycleModelSelection, resolveModelArg }

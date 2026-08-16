@@ -6,7 +6,7 @@
 // and each message carries a first-line summary for the collapsed /tools on
 // view. Also covers the nested content walkers used by image rendering and
 // history rebuilds.
-import { collectImageBlocks, contentText, reasoningBlocks, reasoningSummary, toolCallInfo, toolResultMessage } from './index.js'
+import { collectImageBlocks, contentText, reasoningBlocks, reasoningSummary, toolCallInfo, toolResultMessage, cycleModelSelection, resolveModelArg } from './index.js'
 
 let failed = 0
 function check(name, cond, detail) {
@@ -115,6 +115,27 @@ const reasBlock = (text) => ({ type: 'reasoning', text })
 check('reasoningBlocks picks reasoning blocks in order', eq(reasoningBlocks([txtBlock('a'), reasBlock('think'), { type: 'image', data: 'x', mimeType: 'image/png' }, reasBlock('more')]).map((b) => b.text).join('|'), 'think|more'))
 check('reasoningBlocks ignores empty reasoning', eq(reasoningBlocks([reasBlock('')]).length, 0))
 check('reasoningBlocks ignores non-reasoning', eq(reasoningBlocks([txtBlock('a')]).length, 0))
+
+// ---- model switching ---------------------------------------------------------
+
+const MODELS = [
+  { provider: 'opencode-go', model: 'deepseek-v4-flash' },
+  { provider: 'opencode-go', model: 'deepseek-v4-pro' },
+  { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
+  { provider: 'deepseek-official', model: 'deepseek-v4-pro' },
+]
+
+check('cycle forward wraps to the first entry', eq(cycleModelSelection(MODELS, 'opencode-go', 'deepseek-v4-pro', 'forward'), MODELS[2]), cycleModelSelection(MODELS, 'opencode-go', 'deepseek-v4-pro', 'forward'))
+check('cycle backward wraps to the last entry', eq(cycleModelSelection(MODELS, 'opencode-go', 'deepseek-v4-flash', 'backward'), MODELS[3]), cycleModelSelection(MODELS, 'opencode-go', 'deepseek-v4-flash', 'backward'))
+check('cycle forward moves within the list', eq(cycleModelSelection(MODELS, 'deepseek-official', 'deepseek-v4-flash', 'forward'), MODELS[3]), cycleModelSelection(MODELS, 'deepseek-official', 'deepseek-v4-flash', 'forward'))
+check('cycle on a one-model list is undefined', cycleModelSelection([MODELS[0]], 'opencode-go', 'deepseek-v4-flash', 'forward') === undefined)
+check('cycle on an unknown current pair is undefined', cycleModelSelection(MODELS, 'opencode-go', 'nope', 'forward') === undefined)
+
+check('resolve provider/model arg', eq(resolveModelArg(MODELS, 'opencode-go/deepseek-v4-pro'), MODELS[1]), resolveModelArg(MODELS, 'opencode-go/deepseek-v4-pro'))
+check('resolve bare model id (unique across providers)', eq(resolveModelArg(MODELS, 'deepseek-v4-pro'), undefined), resolveModelArg(MODELS, 'deepseek-v4-pro')) // appears twice -> ambiguous
+check('resolve bare model id unique', eq(resolveModelArg([MODELS[0], MODELS[1]], 'deepseek-v4-pro'), MODELS[1]), resolveModelArg([MODELS[0], MODELS[1]], 'deepseek-v4-pro'))
+check('resolve unknown model is undefined', resolveModelArg(MODELS, 'gpt-99') === undefined)
+check('resolve unknown provider is undefined', resolveModelArg(MODELS, 'nope/deepseek-v4-flash') === undefined)
 
 console.log(failed ? `\n${failed} failure(s)` : '\nall tests passed')
 process.exit(failed ? 1 : 0)
