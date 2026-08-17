@@ -6,6 +6,7 @@ The main package: pi on [DeepSeek Harness](https://github.com/deepseek-ai/deepse
 dsh-pi setup pi            # create a web profile; new sessions default to pi
 dsh-pi setup job headless  # headless (one-shot task) profile
 dsh-pi tui                 # launch the terminal UI (@dsh-pi/tui)
+dsh-pi watch [session-id]  # real-time web mirror of a TUI session (@dsh-pi/watch)
 dsh-pi web [name]          # boot a web profile (default: pi)
 ```
 
@@ -14,6 +15,7 @@ dsh-pi web [name]          # boot a web profile (default: pi)
 - `setup` (web) installs **`@dsh-pi/preset`** — which pulls `prompt` / `fff` / `tools`, makes `dsh-pi` the default agent preset (pi prompt + frecency search + pi edit), and installs the preset composition into the auto-discovered user root. New sessions are pi out of the box.
 - `setup` (headless) wires the three bundles directly (headless has no agent-preset machinery).
 - `tui` launches the pi-style terminal chat (Editor + Markdown + ScrollView) driving a local `pi-sdk` runtime over stdio JSON-RPC.
+- `watch` tails the shared session log (`listSnapshots` + `readFrom`) and serves a self-contained web page that streams the TUI session's events in near-real-time — the TUI keeps writing, the browser watches; works even after the TUI exits (full replay).
 
 Requires `dsh` (on PATH or `DSH_BIN`; otherwise auto-fetched via `npx @deepseek-ai/dsh`).
 
@@ -33,6 +35,7 @@ Requires `dsh` (on PATH or `DSH_BIN`; otherwise auto-fetched via `npx @deepseek-
 | `@dsh-pi/fff` | ffgrep/fffind (frecency search) |
 | `@dsh-pi/tools` | pi-interface edit + tool descriptions |
 | `@dsh-pi/tui` | terminal UI |
+| `@dsh-pi/watch` | real-time TUI→web session mirror (SSE page over the shared log) |
 
 ## License
 

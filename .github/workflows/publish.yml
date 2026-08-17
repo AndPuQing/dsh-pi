@@ -28,11 +28,12 @@ jobs:
           node --check packages/prompt/index.js
           node --check packages/fff/index.js
           node --check packages/tools/index.js
+          node --check packages/watch/index.js
 
       - name: Publish changed packages
         run: |
           set -e
-          for pkg in prompt fff tools; do
+          for pkg in prompt fff tools watch; do
             name="@dsh-pi/$pkg"
             local="$(node -p "require('./packages/$pkg/package.json').version")"
             published="$(npm view "$name" version 2>/dev/null || echo none)"

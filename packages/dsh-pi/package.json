@@ -14,7 +14,8 @@
   ],
   "dependencies": {
     "@dsh-pi/preset": "^0.1.0",
-    "@dsh-pi/tui": "^0.1.2"
+    "@dsh-pi/tui": "^0.1.2",
+    "@dsh-pi/watch": "^0.1.0"
   },
   "keywords": [
     "dsh",

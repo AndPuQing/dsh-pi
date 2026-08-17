@@ -4,6 +4,7 @@
 // Commands:
 //   dsh-pi setup <name> [web|headless]  create a profile wired for dsh-pi
 //   dsh-pi tui                          launch the terminal UI (@dsh-pi/tui)
+//   dsh-pi watch [session-id] [opts]    real-time web mirror of a TUI session (@dsh-pi/watch)
 //   dsh-pi web [name] [dsh args...]     boot a web profile (default: pi)
 //   dsh-pi version
 //   dsh-pi help
@@ -24,13 +25,19 @@ const HELP = `dsh-pi — pi on DeepSeek Harness
 usage:
   dsh-pi setup <name> [web|headless]   create a profile wired for dsh-pi
   dsh-pi tui                           launch the terminal UI
+  dsh-pi watch [session-id] [opts]     real-time web mirror of a TUI session
   dsh-pi web [name] [args...]          boot a web profile (default: pi)
   dsh-pi version
   dsh-pi help
 
 web profiles install @dsh-pi/preset, which makes dsh-pi the default agent
 preset (pi prompt + ffgrep/fffind + pi edit) — new sessions are pi out of
-the box. headless profiles wire the three bundles directly.`
+the box. headless profiles wire the three bundles directly.
+
+watch serves a self-contained web page that streams a TUI session's events
+in near-real-time by tailing the shared session log (listSnapshots +
+readFrom) — the TUI keeps writing, the browser watches. Options: --port
+(default 8123), --poll (default 500 ms), --host (default 127.0.0.1).`
 
 function writeProfile(dest, pkg, patch) {
   fs.mkdirSync(dest, { recursive: true })
@@ -125,6 +132,18 @@ function tui() {
   child.on('exit', (code) => process.exit(code ?? 0))
 }
 
+function watch(args) {
+  let entry
+  try {
+    entry = require.resolve('@dsh-pi/watch')
+  } catch {
+    console.error('@dsh-pi/watch not found — install it with: npm i -g @dsh-pi/watch')
+    process.exit(1)
+  }
+  const child = spawn(process.execPath, [entry, ...args], { stdio: 'inherit' })
+  child.on('exit', (code) => process.exit(code ?? 0))
+}
+
 function web(name, args) {
   // auto-provision: create the profile on first use — no explicit setup step
   if (!fs.existsSync(path.join(home, 'profiles', name))) {
@@ -146,6 +165,9 @@ switch (cmd) {
   }
   case 'tui':
     tui()
+    break
+  case 'watch':
+    watch(process.argv.slice(3))
     break
   case 'web': {
     const name = process.argv[3] || 'pi'
