@@ -1,26 +1,20 @@
 {
-  "name": "@dsh-pi/watch",
+  "name": "@dsh-pi/runtime",
   "version": "0.1.0",
-  "description": "TUI→Web real-time session mirror for dsh-pi — tails the shared session log (listSnapshots + readFrom) and serves a self-contained SSE web page",
+  "description": "Shared in-process pi runtime for dsh-pi surfaces — one runtime, N renderers (TUI + web) over the same live session event stream",
   "type": "module",
   "main": "./index.js",
-  "bin": {
-    "dsh-pi-watch": "./index.js"
-  },
   "files": [
     "index.js",
-    "README.md",
     "LICENSE"
   ],
   "keywords": [
     "dsh",
     "deepseek-harness",
     "pi",
+    "runtime",
     "tui",
-    "web",
-    "realtime",
-    "tail",
-    "sse"
+    "web"
   ],
   "license": "MIT",
   "repository": {

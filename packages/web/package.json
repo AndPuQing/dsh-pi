@@ -1,0 +1,32 @@
+{
+  "name": "@dsh-pi/web",
+  "version": "0.1.0",
+  "description": "Web surface for dsh-pi — a second renderer of the same live runtime (SSE push, no polling): the browser can watch, chat, switch sessions, rename and interrupt. Mounts on the TUI (dsh-pi tui --serve) or runs headless (dsh-pi serve)",
+  "type": "module",
+  "main": "./index.js",
+  "bin": {
+    "dsh-pi-web": "./index.js"
+  },
+  "files": [
+    "index.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "pi",
+    "web",
+    "realtime",
+    "sse",
+    "tui"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AndPuQing/dsh-pi.git"
+  },
+  "dependencies": {
+    "@dsh-pi/runtime": "^0.1.0"
+  }
+}

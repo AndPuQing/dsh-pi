@@ -1,6 +1,6 @@
 {
   "name": "@dsh-pi/tui",
-  "version": "0.1.17",
+  "version": "0.1.18",
   "description": "Terminal UI for dsh-pi — drives the dsh-pi SDK runtime over stdio JSON-RPC (v0: readline shell)",
   "type": "module",
   "main": "./index.js",
@@ -26,10 +26,12 @@
   },
   "dependencies": {
     "@earendil-works/pi-tui": "^0.84.1",
+    "@dsh-pi/runtime": "^0.1.0",
+    "@dsh-pi/web": "^0.1.0",
+    "@deepseek-ai/dsh": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-agent": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-app-boot": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-llm": "^0.1.0-rc.6",
-    "@deepseek-ai/dsh-session": "^0.1.0-rc.6",
-    "@deepseek-ai/dsh": "^0.1.0-rc.6"
+    "@deepseek-ai/dsh-session": "^0.1.0-rc.6"
   }
 }
