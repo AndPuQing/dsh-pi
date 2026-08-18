@@ -1,23 +1,20 @@
 {
-  "name": "@dsh-pi/tui",
-  "version": "0.1.18",
-  "description": "Terminal UI for dsh-pi — drives the dsh-pi SDK runtime over stdio JSON-RPC (v0: readline shell)",
+  "name": "@dsh-pi/runtime",
+  "version": "0.1.0",
+  "description": "Shared in-process pi runtime for dsh-pi surfaces — one runtime, N renderers (TUI + web) over the same live session event stream",
   "type": "module",
   "main": "./index.js",
-  "bin": {
-    "dsh-pi-tui": "./index.js"
-  },
   "files": [
     "index.js",
-    "README.md",
     "LICENSE"
   ],
   "keywords": [
     "dsh",
     "deepseek-harness",
     "pi",
+    "runtime",
     "tui",
-    "terminal"
+    "web"
   ],
   "license": "MIT",
   "repository": {
@@ -25,9 +22,6 @@
     "url": "git+https://github.com/AndPuQing/dsh-pi.git"
   },
   "dependencies": {
-    "@earendil-works/pi-tui": "^0.84.1",
-    "@dsh-pi/runtime": "^0.1.0",
-    "@dsh-pi/web": "^0.1.0",
     "@deepseek-ai/dsh": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-agent": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-app-boot": "^0.1.0-rc.6",

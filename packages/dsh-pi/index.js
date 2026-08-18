@@ -3,7 +3,9 @@
 //
 // Commands:
 //   dsh-pi setup <name> [web|headless]  create a profile wired for dsh-pi
-//   dsh-pi tui                          launch the terminal UI (@dsh-pi/tui)
+//   dsh-pi tui [--serve [port]]         launch the terminal UI (@dsh-pi/tui)
+//   dsh-pi serve [session-id] [opts]    headless web hub — browser chats the
+//                                       session directly (@dsh-pi/web)
 //   dsh-pi web [name] [dsh args...]     boot a web profile (default: pi)
 //   dsh-pi version
 //   dsh-pi help
@@ -23,14 +25,25 @@ const HELP = `dsh-pi — pi on DeepSeek Harness
 
 usage:
   dsh-pi setup <name> [web|headless]   create a profile wired for dsh-pi
-  dsh-pi tui                           launch the terminal UI
+  dsh-pi tui [--serve [port]]          launch the terminal UI
+  dsh-pi serve [session-id] [opts]     headless web hub for a session
   dsh-pi web [name] [args...]          boot a web profile (default: pi)
   dsh-pi version
   dsh-pi help
 
 web profiles install @dsh-pi/preset, which makes dsh-pi the default agent
 preset (pi prompt + ffgrep/fffind + pi edit) — new sessions are pi out of
-the box. headless profiles wire the three bundles directly.`
+the box. headless profiles wire the three bundles directly.
+
+TUI and Web are two surfaces over ONE in-process runtime: the browser
+mirrors the TUI session live (SSE push, zero polling) and can chat, switch
+sessions, rename and interrupt it.
+
+  dsh-pi tui --serve [port]     TUI + web on the same session (default port 8123)
+  dsh-pi serve [session-id]     web-only hub — resumes the TUI's last session
+                                for this cwd (or the given id; --new for a
+                                fresh session). Options: --port, --host
+                                (default 127.0.0.1), --new.`
 
 function writeProfile(dest, pkg, patch) {
   fs.mkdirSync(dest, { recursive: true })
@@ -113,7 +126,7 @@ function resolveDsh() {
   return { cmd: 'npx', args: ['--yes', '@deepseek-ai/dsh'] }
 }
 
-function tui() {
+function tui(args) {
   let entry
   try {
     entry = require.resolve('@dsh-pi/tui')
@@ -121,7 +134,19 @@ function tui() {
     console.error('@dsh-pi/tui not found — install it with: npm i -g @dsh-pi/tui')
     process.exit(1)
   }
-  const child = spawn(process.execPath, [entry], { stdio: 'inherit' })
+  const child = spawn(process.execPath, [entry, ...args], { stdio: 'inherit' })
+  child.on('exit', (code) => process.exit(code ?? 0))
+}
+
+function serve(args) {
+  let entry
+  try {
+    entry = require.resolve('@dsh-pi/web')
+  } catch {
+    console.error('@dsh-pi/web not found — install it with: npm i -g @dsh-pi/web')
+    process.exit(1)
+  }
+  const child = spawn(process.execPath, [entry, ...args], { stdio: 'inherit' })
   child.on('exit', (code) => process.exit(code ?? 0))
 }
 
@@ -145,7 +170,10 @@ switch (cmd) {
     break
   }
   case 'tui':
-    tui()
+    tui(process.argv.slice(3))
+    break
+  case 'serve':
+    serve(process.argv.slice(3))
     break
   case 'web': {
     const name = process.argv[3] || 'pi'

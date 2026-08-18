@@ -28,11 +28,16 @@ jobs:
           node --check packages/prompt/index.js
           node --check packages/fff/index.js
           node --check packages/tools/index.js
+          node --check packages/runtime/index.js
+          node --check packages/web/index.js
+          node --check packages/tui/index.js
+          DSH_PI_TUI_TEST=1 node packages/tui/test.js
+          node packages/web/test.js
 
       - name: Publish changed packages
         run: |
           set -e
-          for pkg in prompt fff tools; do
+          for pkg in prompt fff tools runtime web tui dsh-pi; do
             name="@dsh-pi/$pkg"
             local="$(node -p "require('./packages/$pkg/package.json').version")"
             published="$(npm view "$name" version 2>/dev/null || echo none)"

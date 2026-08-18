@@ -6,6 +6,9 @@ Terminal UI for dsh-pi. **v0**: a readline-based interactive shell that drives t
 
 ```sh
 dsh-pi-tui            # requires dsh on PATH
+dsh-pi-tui --serve [port]   # also mount the web surface on the SAME live
+                            # session (default port 8123) — the browser can
+                            # watch in real time and chat / switch sessions
 ```
 
 First run auto-creates the `pi-embed` profile (`$DSH_HOME/profiles/pi-embed`: base + @dsh-pi/prompt + fff + tools) and installs its dependencies via `bunx pnpm` / `npx pnpm`.

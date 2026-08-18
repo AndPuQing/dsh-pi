@@ -9,6 +9,8 @@ pi on [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (dsh) 
 | [`@dsh-pi/prompt`](packages/prompt) | pi-style system prompt: complete-mode persona, tool one-liners, guidelines, cwd line | `dsh plugin --profile <name> add @dsh-pi/prompt` |
 | [`@dsh-pi/fff`](packages/fff) | `ffgrep` / `fffind` — frecency-ranked content & fuzzy file search (FFF engine) | `dsh plugin --profile <name> add @dsh-pi/fff` |
 | [`@dsh-pi/tools`](packages/tools) | pi-interface `edit` (multi-edit `edits[]` with oldText/newText) + pi wording for read/write/bash descriptions | `dsh plugin --profile <name> add @dsh-pi/tools` |
+| [`@dsh-pi/runtime`](packages/runtime) | shared in-process pi runtime — one runtime, N surfaces (TUI + web) over the same live session event stream | library (bundled by tui/web) |
+| [`@dsh-pi/web`](packages/web) | web surface — second renderer of the live session: browser mirrors the TUI in real time (SSE push) and can chat, switch sessions, rename, interrupt | `dsh-pi tui --serve` / `dsh-pi serve [session-id]` |
 
 Each package is a dsh bundle: install with `dsh plugin add`, it auto-registers in the profile manifest, restart the profile, done.
 
